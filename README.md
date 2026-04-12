@@ -34,16 +34,9 @@ with nearby homes from the same zipcode.
 pip install -r requirements.txt
 ```
 
-Create a `.env` with your BrightData credentials:
-
-```env
-BRIGHTDATA_CUSTOMER_ID=hl_xxxxxxxx
-BRIGHTDATA_PASSWORD=xxxxxxxxxx
-BRIGHTDATA_ZONE=zillow_web_unlocker
-BRIGHTDATA_HOST=brd.superproxy.io
-BRIGHTDATA_PORT=33335
-BRIGHTDATA_COUNTRY=us
-```
+Create a `.env` file in the project root with your BrightData credentials.
+The required keys are read in `app/config.py` — see that file for the exact
+names. Without proxy credentials Zillow will block requests.
 
 ## Run the server
 
