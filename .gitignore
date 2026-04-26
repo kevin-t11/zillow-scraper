@@ -8,3 +8,6 @@ venv/
 .idea/
 .vscode/
 *.log
+input-urls.json
+output-urls.json
+verified_addresses.json

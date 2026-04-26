@@ -239,6 +239,29 @@ def _is_blocked(html: str) -> bool:
     return any(s in lower for s in signals) and len(html) < 80_000
 
 
+async def _fetch_with_fallback(
+    direct_client: httpx.AsyncClient,
+    proxy_client: httpx.AsyncClient,
+    url: str,
+    headers: dict,
+    timeout: int = 30,
+) -> tuple[Optional[httpx.Response], bool]:
+    """Try direct first; on block/error fall back to proxy. Returns (resp, used_proxy)."""
+    try:
+        resp = await direct_client.get(url, headers=headers, timeout=timeout, follow_redirects=True)
+        if resp.status_code == 200 and not _is_blocked(resp.text):
+            return resp, False
+        logger.debug(f"  Direct blocked ({resp.status_code}, len={len(resp.text)}) — trying proxy")
+    except Exception as e:
+        logger.debug(f"  Direct error: {e} — trying proxy")
+    try:
+        resp = await proxy_client.get(url, headers=headers, timeout=timeout, follow_redirects=True)
+        return resp, True
+    except Exception as e:
+        logger.debug(f"  Proxy error: {e}")
+        return None, True
+
+
 def _extract_gdp_property(data: dict) -> dict:
     """Walk __NEXT_DATA__ to find the property dict in gdpClientCache."""
     props = data.get("props", {})
@@ -517,16 +540,16 @@ async def scrape_one(
 
                 headers = _random_headers()
                 headers["Referer"] = "https://www.zillow.com/"
-                resp = await proxy_client.get(
-                    detail_url, headers=headers, timeout=30, follow_redirects=True
+                resp, used_proxy = await _fetch_with_fallback(
+                    direct_client, proxy_client, detail_url, headers, timeout=30
                 )
 
-                if resp.status_code != 200:
+                if resp is None or resp.status_code != 200:
                     if attempt < max_retries:
                         continue
                     return PropertyListing(
                         input_address=address, status="error",
-                        error_msg=f"HTTP {resp.status_code}", zpid=zpid,
+                        error_msg=f"HTTP {resp.status_code if resp else 'no-response'}", zpid=zpid,
                         url=detail_url, attempts=attempt,
                     )
 
@@ -589,6 +612,7 @@ async def scrape_one_url(
     url: str,
     semaphore: asyncio.Semaphore,
     max_retries: int = 2,
+    direct_client: Optional[httpx.AsyncClient] = None,
 ) -> PropertyListing:
     """Fetch a Zillow detail page URL directly and parse it. Single HTTP request."""
     async with semaphore:
@@ -602,16 +626,19 @@ async def scrape_one_url(
 
                 headers = _random_headers()
                 headers["Referer"] = "https://www.zillow.com/"
-                resp = await proxy_client.get(
-                    url, headers=headers, timeout=30, follow_redirects=True
-                )
+                if direct_client is not None:
+                    resp, _used = await _fetch_with_fallback(
+                        direct_client, proxy_client, url, headers, timeout=30
+                    )
+                else:
+                    resp = await proxy_client.get(url, headers=headers, timeout=30, follow_redirects=True)
 
-                if resp.status_code != 200:
+                if resp is None or resp.status_code != 200:
                     if attempt < max_retries:
                         continue
                     return PropertyListing(
                         input_address=url, status="error",
-                        error_msg=f"HTTP {resp.status_code}", zpid=zpid,
+                        error_msg=f"HTTP {resp.status_code if resp else 'no-response'}", zpid=zpid,
                         url=url, attempts=attempt,
                     )
 
@@ -657,6 +684,7 @@ async def fetch_nearby_homes_by_zip(
     city_state_zip: tuple[str, str, str],
     semaphore: asyncio.Semaphore,
     max_retries: int = 2,
+    direct_client: Optional[httpx.AsyncClient] = None,
 ) -> list[dict]:
     """
     Fetch the Zillow zipcode search page and return list of nearby homes.
@@ -677,9 +705,14 @@ async def fetch_nearby_homes_by_zip(
 
                 headers = _random_headers()
                 headers["Referer"] = "https://www.zillow.com/"
-                resp = await proxy_client.get(url, headers=headers, timeout=30, follow_redirects=True)
+                if direct_client is not None:
+                    resp, _used = await _fetch_with_fallback(
+                        direct_client, proxy_client, url, headers, timeout=30
+                    )
+                else:
+                    resp = await proxy_client.get(url, headers=headers, timeout=30, follow_redirects=True)
 
-                if resp.status_code != 200:
+                if resp is None or resp.status_code != 200:
                     if attempt < max_retries:
                         continue
                     return []
@@ -728,18 +761,18 @@ async def _scrape_url_with_nearby(
     max_retries: int,
     nearby_cache: dict,
     nearby_locks: dict,
+    direct_client: Optional[httpx.AsyncClient] = None,
 ) -> PropertyListing:
     """Scrape one URL, then immediately fetch its zipcode (if not cached)."""
-    result = await scrape_one_url(client, url, sem, max_retries)
+    result = await scrape_one_url(client, url, sem, max_retries, direct_client=direct_client)
     if result.status == "success" and result.zipcode:
         csz = (result.city, result.state, result.zipcode)
-        # Use a per-zip lock so duplicate zipcodes only fetch once
         if csz not in nearby_locks:
             nearby_locks[csz] = asyncio.Lock()
         async with nearby_locks[csz]:
             if csz not in nearby_cache:
                 nearby_cache[csz] = await fetch_nearby_homes_by_zip(
-                    client, csz, sem, max_retries
+                    client, csz, sem, max_retries, direct_client=direct_client
                 )
         nearby = nearby_cache.get(csz, [])
         result.nearby_homes = [h for h in nearby if h.get("zpid") != result.zpid][:20]
@@ -764,7 +797,7 @@ async def _scrape_addr_with_nearby(
         async with nearby_locks[csz]:
             if csz not in nearby_cache:
                 nearby_cache[csz] = await fetch_nearby_homes_by_zip(
-                    proxy_client, csz, sem, max_retries
+                    proxy_client, csz, sem, max_retries, direct_client=direct_client
                 )
         nearby = nearby_cache.get(csz, [])
         result.nearby_homes = [h for h in nearby if h.get("zpid") != result.zpid][:20]
