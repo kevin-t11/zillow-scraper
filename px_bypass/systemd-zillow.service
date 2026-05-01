@@ -1,0 +1,32 @@
+[Unit]
+Description=Zillow PX-bypass scraper (patchright + cookie pool)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/srv/zillow
+EnvironmentFile=/srv/zillow/.env
+
+# Single entry point. Cookies persist to ~/.cache/zillow_pool/slots.json by
+# default — set COOKIE_POOL_PERSIST in .env to override. On restart the pool
+# rehydrates from disk in seconds instead of paying the full mint cost.
+ExecStart=/srv/zillow/.venv/bin/python3 /srv/zillow/run.py
+
+# Always restart, even on clean exits — "deploy once, forget" mode.
+Restart=always
+RestartSec=10
+
+# Block restarts within 60s if we crash >5 times — protects against tight
+# crash loops if the upstream proxy is fully down.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Memory ceiling protects the VM if patchright leaks; systemd will SIGKILL
+# and restart, which now rehydrates in seconds.
+MemoryMax=1800M
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

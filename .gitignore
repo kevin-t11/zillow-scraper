@@ -11,3 +11,4 @@ venv/
 input-urls.json
 output-urls.json
 verified_addresses.json
+/output/

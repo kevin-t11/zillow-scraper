@@ -1,56 +1,68 @@
 #!/usr/bin/env python3
 """
-run.py — Entry point for the Zillow Scraper
+Single entry point for the Zillow PX-Bypass server.
 
-Usage:
-  python run.py                          # Start API server (default port 8000)
-  python run.py --port 3000              # Custom port
-  python run.py --host 127.0.0.1         # Localhost only
+  python run.py                    # http://0.0.0.0:8000, headless minter
+  python run.py --port 3000        # custom port
+  python run.py --host 127.0.0.1   # localhost only
+  python run.py --reload           # auto-reload on code changes
+  python run.py --headed           # show the patched Chromium (debugging)
+  python run.py --pool-size 12     # larger cookie pool
+
+Boots `px_bypass.serve:app` — which on lifespan-startup launches a single
+patched Chromium and mints `--pool-size` cookies in parallel via Evomi
+residential. Routes are defined in `px_bypass/routes.py`.
 """
+
+from __future__ import annotations
 
 import argparse
 import logging
+import os
+
 import uvicorn
 
 
-
-
-
-from app.config import load_settings
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Zillow Scraper API Server")
-    parser.add_argument("--host", default=None, help="Bind host (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=None, help="Bind port (default: 8000)")
-    parser.add_argument("--reload", action="store_true", help="Auto-reload on code changes")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Zillow PX-Bypass API server")
+    parser.add_argument("--host", default=os.getenv("API_HOST", "0.0.0.0"))
+    parser.add_argument("--port", type=int, default=int(os.getenv("API_PORT", "8000")))
+    parser.add_argument("--reload", action="store_true", help="auto-reload on code changes")
     parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument("--headed", action="store_true", help="show patched Chromium window")
+    parser.add_argument("--pool-size", type=int, default=int(os.getenv("POOL_SIZE", "24")))
+    parser.add_argument("--per-slot-c", type=int, default=int(os.getenv("POOL_PER_SLOT_C", "5")))
     args = parser.parse_args()
 
-    settings = load_settings()
-    host = args.host or settings.host
-    port = args.port or settings.port
+    # Pass tuning knobs to the serve module via env (lifespan reads them there).
+    os.environ["POOL_SIZE"] = str(args.pool_size)
+    os.environ["POOL_PER_SLOT_C"] = str(args.per_slot_c)
+    os.environ["HEADLESS"] = "false" if args.headed else "true"
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
     )
 
-    print(f"\n  Zillow Scraper API")
-    print(f"  http://{host}:{port}")
-    print(f"  Proxy: {'enabled (' + settings.brightdata_zone + ')' if settings.brightdata_customer_id else 'disabled'}")
-    print(f"\n  Endpoints:")
-    print(f"    POST /scrape       - Stream results via SSE (batches of {settings.batch_size})")
-    print(f"    POST /scrape/sync  - Return all results as JSON")
-    print(f"    POST /scrape/urls  - Fast: scrape Zillow URLs directly (skip ZPID lookup)")
-    print(f"    GET  /health       - Health check")
-    print(f"    GET  /docs         - Swagger UI\n")
+    print()
+    print("  Zillow PX-Bypass API")
+    print(f"  http://{args.host}:{args.port}")
+    print(f"  pool_size={args.pool_size}  per_slot_c={args.per_slot_c}  "
+          f"headless={'no' if args.headed else 'yes'}")
+    print()
+    print("  Endpoints:")
+    print("    GET  /info                  - service metadata + endpoint catalog")
+    print("    GET  /health                - cookie pool stats")
+    print("    POST /v2/scrape/urls        - scrape Zillow listing URLs directly")
+    print("    POST /v2/scrape/addresses   - resolve addresses → scrape")
+    print("    GET  /docs                  - Swagger UI")
+    print()
 
     uvicorn.run(
-        "app.server:app",
-        host=host,
-        port=port,
+        "px_bypass.serve:app",
+        host=args.host,
+        port=args.port,
         reload=args.reload,
         log_level="debug" if args.verbose else "info",
     )

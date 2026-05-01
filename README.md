@@ -1,195 +1,212 @@
-# Zillow Scraper
+# Zillow PX-Bypass Scraper
 
-Fast async Zillow property scraper with FastAPI server. Resolves addresses or
-accepts URLs directly, fetches full listing data, and enriches each listing
-with nearby homes from the same zipcode.
+High-throughput Zillow scraper that bypasses PerimeterX (HUMAN Bot Defender)
+press-and-hold protection without paying for a captcha solver. Uses a patched
+Chromium to mint wide-scope `_px3` cookies through an Evomi residential proxy,
+then replays the cookies via concurrent `httpx` against Zillow's
+`ForSaleNonPriorityQuery` GraphQL endpoint.
 
-## What you get per listing
+**Validated benchmark:** 2500 URLs in 119.8s — 100% success — 20.88 listings/sec.
 
-**Core property data** (extracted from `__NEXT_DATA__`):
-- `zpid`, `url`, `full_address`, `street`, `city`, `state`, `zipcode`
-- `price`, `price_str`, `zestimate`, `rent_zestimate`, `last_sold_price`, `last_sold_date`
-- `bedrooms`, `bathrooms`, `living_area_sqft`, `lot_size_sqft`, `home_type`, `year_built`
-- `price_per_sqft`, `property_tax_rate`, `monthly_hoa_fee`
-- `parking_spaces`, `garage_spaces`, `parking_features`
-- `listing_status`, `days_on_zillow`, `views`, `saves`, `listing_date`
-- `agent_name`, `agent_phone`, `broker_name`, `mls_id`
-- `mortgage_rate_30yr`, `mortgage_rate_15yr`, `mortgage_rate_arm5`
-- `description`, `highlights`, `latitude`, `longitude`
-- `photos` (up to 50 high-res URLs), `photo_count`
+## Architecture
 
-**Enrichment from zipcode pages** (cached, fetched once per unique zip):
-- `nearby_homes` — up to 20 listings in the same zipcode with `price`, `bedrooms`,
-  `bathrooms`, `living_area`, `address`, `url`, `image`
+```
+                     ┌─────────────────────────┐
+                     │  patchright + Evomi     │  free, ~17s/mint
+                     │  (mints _px3 cookies)   │  no captcha service
+                     └────────────┬────────────┘
+                                  │
+                          ┌───────▼────────┐
+                          │  CookiePool    │  N slots, sticky proxy
+                          │  per slot      │  per-slot concurrency cap
+                          └───────┬────────┘     auto-refresh on 403
+                                  │
+                ┌─────────────────▼──────────────────┐
+                │  scrape_urls_via_px (httpx + h2)   │  ~21 listings/sec
+                │  ForSaleNonPriorityQuery GraphQL   │  full property data
+                └────────────────────────────────────┘
+```
 
-**Conditional** (present only for showcase listings):
-- `schools`, `price_history`, `tax_history` — these are loaded via Zillow's
-  `ForSaleNonPriorityQuery` GraphQL endpoint, which the BrightData web_unlocker
-  zone blocks. Showcase listings have them embedded in the initial page load
-  (~24% of listings in our test set).
+### Why each piece exists
+
+- **patchright** — a maintained patched Playwright that hides the automation
+  flags vanilla Playwright/Camoufox leak. PX accepts its fingerprint, so a
+  fresh `_px3` cookie is minted on a normal page load (no press-and-hold
+  challenge needed in our testing). Free, no per-mint cost.
+
+- **Evomi residential proxy** — every request (mint + replay) routes through
+  a residential exit IP. Sticky session per cookie slot, so PX sees one IP
+  per session token instead of churn across ASNs.
+
+- **Cookie pool** — PX flags a `_px3` token after a few hundred hits. We mint
+  N cookies up front, round-robin them, and on 403 mark the slot dead and
+  schedule a background mint. Per-slot concurrency cap prevents bursts from
+  burning a cookie prematurely.
+
+- **`ForSaleNonPriorityQuery`** — Zillow's GraphQL endpoint for full listing
+  detail (schools, price history, tax history, nearby homes). Body must be a
+  byte-exact match against Zillow's safelist; the verbatim 34 KB query is
+  in `px_bypass/queries/for_sale_non_priority.json`.
 
 ## Setup
 
 ```bash
 pip install -r requirements.txt
+patchright install chrome
 ```
 
-Create a `.env` file in the project root with your BrightData credentials.
-The required keys are read in `app/config.py` — see that file for the exact
-names. Without proxy credentials Zillow will block requests.
-
-## Run the server
+Create `.env` in the project root:
 
 ```bash
-python run.py                # http://0.0.0.0:8000
-python run.py --port 3000    # custom port
-python run.py --reload       # auto-reload on code change
+EVOMI_USERNAME=...
+EVOMI_PASSWORD=...
+EVOMI_HOST=rp.evomi.com    # default
+EVOMI_PORT=1000            # default
 ```
 
-The server returns results directly in the HTTP response — it does **not**
-write any output files. Files are only written when you run the test scripts
-locally (see below).
+## Run
 
-## Endpoints
-
-| Endpoint | Input | Returns |
-|----------|-------|---------|
-| `POST /scrape/urls` | Zillow listing URLs | **Full data + nearby homes** |
-| `POST /scrape/addresses` | Street addresses | **Full data + nearby homes** |
-| `POST /scrape/urls/fast` | Zillow listing URLs | Core data only (no nearby) |
-| `POST /scrape` | Addresses (SSE) | Streaming, core data only |
-| `POST /scrape/sync` | Addresses | Sync, core data only |
-| `GET  /health` | — | Health check |
-| `GET  /docs` | — | Swagger UI |
-
-### `POST /scrape/urls` (recommended for URLs)
+### HTTP API server
 
 ```bash
-curl -X POST http://localhost:8000/scrape/urls \
+python run.py                          # http://0.0.0.0:8000, headless
+python run.py --port 3000              # custom port
+python run.py --headed                 # show the patched Chromium (debug)
+python run.py --pool-size 12           # bigger cookie pool
+python run.py --reload                 # auto-reload on code change
+```
+
+`run.py` is the single entry point. On startup it boots `px_bypass.serve:app`
+which launches one patched Chromium, mints `--pool-size` cookies in parallel
+via Evomi (~50s for 8 cookies), then serves the API.
+
+### Bulk CLI test
+
+```bash
+python -m px_bypass.test_2500 100 30 4 --proxy-only       # smoke test
+python -m px_bypass.test_2500 2500 60 8 --proxy-only      # validation run
+# args: <n_urls> <concurrency> <pool_size>
+```
+
+Reads URLs from `input-urls.json`, writes results to
+`property_details_pxbypass_2500.json`.
+
+## API
+
+| Endpoint | Input | Notes |
+|---|---|---|
+| `POST /v2/scrape/urls` | Zillow listing URLs | Direct scrape via cookie pool |
+| `POST /v2/scrape/addresses` | Street addresses | Resolves via Zillow autocomplete (free, no proxy) → scrapes |
+| `GET /health` | — | Pool stats |
+
+### `POST /v2/scrape/urls`
+
+```bash
+curl -X POST http://localhost:8000/v2/scrape/urls \
   -H "Content-Type: application/json" \
   -d '{
-    "urls": [
-      "https://www.zillow.com/homedetails/9315-Parrot-Ave-Downey-CA-90240/21091004_zpid/"
-    ],
-    "concurrency": 100,
-    "retries": 2
+    "urls": ["https://www.zillow.com/homedetails/.../21091004_zpid/"],
+    "concurrency": 60,
+    "max_retries": 3
   }'
 ```
 
-### `POST /scrape/addresses` (recommended for addresses)
+### `POST /v2/scrape/addresses`
 
 ```bash
-curl -X POST http://localhost:8000/scrape/addresses \
+curl -X POST http://localhost:8000/v2/scrape/addresses \
   -H "Content-Type: application/json" \
   -d '{
-    "addresses": [
-      "9315 Parrot Ave, Downey, CA 90240",
-      "1432 Kellam Ave, Los Angeles, CA 90026"
-    ],
-    "concurrency": 100,
-    "retries": 2
+    "addresses": ["9315 Parrot Ave, Downey, CA 90240"],
+    "concurrency": 60,
+    "resolve_concurrency": 50
   }'
 ```
 
-### Response format
+Response:
 
 ```json
 {
-  "results": [
-    {
-      "zpid": "21091004",
-      "full_address": "9315 Parrot Ave, Downey, CA 90240",
-      "price_str": "$1,150,000",
-      "bedrooms": 4,
-      "bathrooms": 3,
-      "living_area_sqft": 2169,
-      "year_built": 1950,
-      "price_per_sqft": 530,
-      "nearby_homes": [
-        { "street": "9570 Gallatin Rd", "price_str": "$1,675,000", "bedrooms": 3, ... }
-      ]
-    }
-  ],
+  "results": [{
+    "zpid": "21091004",
+    "full_address": "9315 Parrot Ave, Downey, CA 90240",
+    "price_str": "$1,150,000",
+    "bedrooms": 4, "bathrooms": 3, "living_area_sqft": 2169,
+    "schools": [...], "price_history": [...], "tax_history": [...],
+    "nearby_homes": [...]
+  }],
   "summary": {
-    "total": 100,
-    "success": 100,
-    "with_nearby_homes": 100,
-    "elapsed": 37.8,
-    "rate": 2.64
+    "total": 1, "success": 1, "blocked": 0,
+    "elapsed_s": 0.85, "rate_per_sec": 1.18,
+    "pool": {"size": 8, "live": 8, "mints": 8, "refreshes": 0}
   }
 }
 ```
 
-## Test scripts
+### `GET /health`
 
-Two test runners are included. They write the same files committed to the repo
-so you can verify reproducibility.
-
-```bash
-# Test URL endpoint with 5 sample URLs → property_details_100.json
-python test_urls.py urls
-
-# Test address endpoint with first 100 entries from input.json
-# → property_details_addresses_100.json
-python test_urls.py addresses
+```json
+{"status": "ok", "size": 8, "live": 8, "mints": 8, "refreshes": 0}
 ```
 
-Note: Only the test scripts write JSON files. The server endpoints return
-results in the HTTP response body — no files are written when you call the API.
+## Tuning
 
-## Performance benchmarks
+| Variable | Default | Effect |
+|---|---|---|
+| `POOL_SIZE` | 8 | Cookies in rotation. Bigger = more throughput, more Evomi bandwidth on init. |
+| `POOL_PER_SLOT_C` | 5 | Concurrent requests per cookie. Higher kills cookies faster; 5 is the sweet spot. |
+| `concurrency` (request) | 60 | Total in-flight requests. Effective ceiling = `POOL_SIZE × POOL_PER_SLOT_C`. |
+| `HEADLESS` | true | Set `false` on a desktop to watch the minter solve the challenge. |
 
-Measured against `input.json` (100 items, BrightData web_unlocker zone, concurrency=100):
+## Cost (at 50k listings/day)
 
-| Endpoint | Items | Time | Success | Nearby Homes | Rate |
-|----------|-------|------|---------|--------------|------|
-| `/scrape/urls`      | 100 URLs      | 37.8s | 100/100 | 100/100 | 2.64/s |
-| `/scrape/addresses` | 100 addresses | 31.7s | 71/100  | 71/71   | 3.16/s |
+| | Per month |
+|---|---|
+| patchright cookie minting | $0 |
+| Evomi residential bandwidth | ~$55 |
+| Lightsail VM ($5 plan) | $5 |
+| **Total** | **~$60/mo** |
 
-The address endpoint is faster because the autocomplete ZPID lookup uses a
-direct (non-proxy) connection. Address resolution success rate (~71%) is bounded
-by Zillow autocomplete's fuzzy matching — addresses without an active listing
-won't resolve.
+vs ~$5,000/mo for a BrightData web_unlocker zone at the same volume.
 
-### Why not faster?
+## Deployment (Lightsail)
 
-The hard limit is BrightData web_unlocker's per-customer rate cap (~1.6–2.6
-req/sec). For 100 listings, the scraper makes ~175 requests (100 listings + ~75
-unique zipcode pages). Both phases overlap aggressively and zipcode pages are
-deduplicated, so this is near the theoretical floor for the current proxy tier.
+The VM is headless, so patchright needs `xvfb` to run a real X display:
 
-To push under 30s for 100 listings with full data, switch the BrightData zone
-to `Datacenter` or `Residential` (higher concurrent connection limits). The
-scraper code itself is already as parallel as possible.
+```bash
+sudo apt install -y xvfb
+xvfb-run -a python -m px_bypass.serve
+```
+
+Or use the included `systemd-zillow.service` unit (edit paths/user, then
+`sudo systemctl enable --now zillow`).
 
 ## Project layout
 
 ```
 zillow_scraper/
-├── app/
+├── px_bypass/
 │   ├── __init__.py
-│   ├── config.py         # Settings + env loading
-│   ├── models.py         # PropertyListing dataclass + Pydantic request models
-│   ├── proxy.py          # BrightData proxy URL builder
-│   ├── scraper.py        # Core scraping logic
-│   └── server.py         # FastAPI app + endpoints
-├── input.json            # 1000 sample addresses for testing
-├── property_details_100.json            # Output of `test_urls.py urls`
-├── property_details_addresses_100.json  # Output of `test_urls.py addresses`
-├── test_urls.py          # Test runner
-├── run.py                # Server entry point
+│   ├── cookie_pool.py        # rotation, sticky proxy, auto-refresh on 403
+│   ├── parser.py             # GraphQL response → PropertyListing
+│   ├── patchright_minter.py  # patched Chromium → _px3 cookies
+│   ├── proxy.py              # Evomi sticky-session URL builder
+│   ├── queries/
+│   │   └── for_sale_non_priority.json   # verbatim Zillow GraphQL body
+│   ├── scraper.py            # concurrent httpx replay + retry/halt logic
+│   ├── serve.py              # FastAPI app + lifespan-managed pool
+│   ├── systemd-zillow.service
+│   └── test_2500.py          # bulk CLI test runner
+├── app/                      # PropertyListing dataclass + legacy BrightData path
+├── input-urls.json           # 2500 sample URLs for benchmarking
 ├── requirements.txt
 └── README.md
 ```
 
-## Notes on missing fields
+## Why the BrightData approach was abandoned
 
-- `year_built`, `price_per_sqft`, `living_area_sqft` — populate for ~94–98% of
-  listings. Missing values are typically apartments/rentals/vacant land.
-- `schools`, `price_history`, `tax_history` — only populate for ~24% of
-  listings (showcase listings). The remaining ~76% load this data via a
-  separate GraphQL call that BrightData's web_unlocker zone blocks at the
-  proxy. This is a product limitation, not a bug in the scraper.
-- `nearby_homes` — populates for 100% of successful listings. Each listing's
-  zipcode page is fetched once and cached, so listings in the same zipcode
-  share the result.
+`app/` still contains the old web_unlocker scraper for reference. It works but
+costs ~$5,000/mo at this volume and BrightData blocks the GraphQL endpoint
+that returns schools / price history / tax history — those fields only
+populate for ~24% of listings via the HTML `__NEXT_DATA__` path. The
+px_bypass path returns full data for 100% of listings.

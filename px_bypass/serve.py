@@ -1,0 +1,77 @@
+"""
+FastAPI server bootstrap.
+
+    python -m px_bypass.serve
+
+Starts the API on $API_PORT (default 8000). At lifespan-startup it
+launches a single patched Chromium and mints an initial pool of
+$POOL_SIZE cookies via Evomi residential. Pool refreshes happen
+lazily, only when a cookie is flagged with 403.
+
+Routes live in `routes.py`. This module only owns process bootstrap.
+
+Environment:
+    API_HOST              0.0.0.0
+    API_PORT              8000
+    POOL_SIZE             8       (cookies in rotation)
+    POOL_PER_SLOT_C       5       (concurrent reqs per cookie)
+    HEADLESS              true    (set "false" on a desktop for debugging)
+    EVOMI_USERNAME        required
+    EVOMI_PASSWORD        required
+"""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+import os
+
+import uvicorn
+from fastapi import FastAPI
+
+from .cookie_pool import CookiePool
+from .patchright_minter import PatchrightMinter
+from .routes import router
+
+logger = logging.getLogger("px_bypass.serve")
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    pool_size = int(os.getenv("POOL_SIZE", "24"))
+    per_slot_c = int(os.getenv("POOL_PER_SLOT_C", "5"))
+    headless = os.getenv("HEADLESS", "true").lower() != "false"
+
+    logger.info("launching patchright (headless=%s)…", headless)
+    minter = await PatchrightMinter.create(headless=headless)
+    logger.info("minting cookie pool of %d…", pool_size)
+    pool = await CookiePool.create(minter.mint, pool_size, per_slot_concurrency=per_slot_c)
+    app.state.minter = minter
+    app.state.pool = pool
+    try:
+        yield
+    finally:
+        logger.info("shutting down…")
+        await pool.aclose()
+        await minter.close()
+
+
+app = FastAPI(title="Zillow PX Bypass", version="2.0", lifespan=lifespan)
+app.include_router(router)
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
+    uvicorn.run(
+        "px_bypass.serve:app",
+        host=os.getenv("API_HOST", "0.0.0.0"),
+        port=int(os.getenv("API_PORT", "8000")),
+        log_level="info",
+    )
+
+
+if __name__ == "__main__":
+    main()
