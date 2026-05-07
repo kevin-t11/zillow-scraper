@@ -59,27 +59,42 @@ def _random_headers() -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def parse_input_address(address: str) -> dict:
-    parts = address.strip().split(',')
-    primary = parts[0].strip()
+    """
+    Parse a full address like "14156 Alisha Creek Ct, Leesburg, VA 20176".
 
-    zip_m = re.search(r'\b(\d{5})\b', primary)
-    zipcode = zip_m.group(1) if zip_m else ""
+    Strategy: extract zipcode and state from the END of the full address
+    (where they always live in US-format), then strip them off to leave the
+    street. Earlier versions only looked at the first comma-separated part,
+    which caused the street number to be mis-parsed as the zipcode.
+    """
+    full = address.strip()
 
-    state_m = re.search(r'\b([A-Z]{2})\s+\d{5}\b', primary.upper())
-    state = state_m.group(1) if state_m else ""
+    # Zipcode = last 5-digit run in the full address
+    zip_matches = list(re.finditer(r'\b(\d{5})(?:-\d{4})?\b', full))
+    zipcode = zip_matches[-1].group(1) if zip_matches else ""
 
-    street_num_m = re.match(r'^(\d+[A-Za-z]?)\s+', primary.strip())
+    # State = 2-letter token immediately before the trailing zipcode, OR
+    # the last "AA" token if no zip is present.
+    state = ""
+    state_m = re.search(r'\b([A-Za-z]{2})\b[\s,]+\d{5}(?:-\d{4})?\s*$', full)
+    if state_m:
+        state = state_m.group(1).upper()
+    else:
+        # No trailing zip — fall back to last 2-letter token after a comma
+        tail_m = re.search(r',\s*([A-Za-z]{2})\s*$', full)
+        if tail_m:
+            state = tail_m.group(1).upper()
+
+    # Street = first comma-separated chunk (before city/state/zip)
+    primary = full.split(',', 1)[0].strip()
+
+    street_num_m = re.match(r'^(\d+[A-Za-z]?)\s+', primary)
     street_number = street_num_m.group(1) if street_num_m else ""
 
-    street_part = primary
-    if zipcode:
-        street_part = street_part[:street_part.rfind(zipcode)].strip()
-    if state:
-        street_part = re.sub(r'\b' + state + r'\b', '', street_part, flags=re.IGNORECASE).strip()
-    if street_number and street_part.upper().startswith(street_number.upper()):
-        street_name = street_part[len(street_number):].strip()
+    if street_number and primary.upper().startswith(street_number.upper()):
+        street_name = primary[len(street_number):].strip()
     else:
-        street_name = street_part
+        street_name = primary
 
     full_street = f"{street_number} {street_name}".strip() if street_number else street_name
 
