@@ -99,14 +99,20 @@ class CookiePool:
         else:
             logger.info("minting initial cookie pool of %d…", size)
 
-        # Mint any slot that wasn't rehydrated
-        idxs_to_mint = [i for i in range(size) if pool._slots[i] is None]
-        if idxs_to_mint:
+        # Mint any slot that wasn't rehydrated, retry failed slots up to 2x
+        # so boot is deterministic at full pool size in prod.
+        for attempt in range(3):
+            idxs_to_mint = [i for i in range(size) if pool._slots[i] is None]
+            if not idxs_to_mint:
+                break
             results = await asyncio.gather(
                 *[pool._mint(i) for i in idxs_to_mint], return_exceptions=True,
             )
             new_live = sum(1 for r in results if isinstance(r, CookieSlot))
-            logger.info("freshly minted %d/%d slots", new_live, len(idxs_to_mint))
+            logger.info("mint attempt %d: %d/%d slots succeeded",
+                        attempt + 1, new_live, len(idxs_to_mint))
+            if new_live == len(idxs_to_mint):
+                break
 
         live = sum(1 for s in pool._slots if s is not None and not s.dead)
         if live == 0:
