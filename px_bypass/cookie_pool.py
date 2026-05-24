@@ -189,9 +189,11 @@ class CookiePool:
             logger.warning("pool[%d] mint failed: %s", idx, e)
             self._slots[idx] = None
             raise
-        if "_px3" not in cookies:
+        if "JSESSIONID" not in cookies:
             self._slots[idx] = None
-            raise RuntimeError(f"pool[{idx}] missing _px3 in {list(cookies)}")
+            raise RuntimeError(f"pool[{idx}] no usable session in {list(cookies)}")
+        if "_px3" not in cookies:
+            logger.info("pool[%d] minted without _px3 (PX not challenging)", idx)
 
         session_id = make_session_id()
         client = self._build_client(session_id)

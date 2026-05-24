@@ -29,7 +29,7 @@ logger = logging.getLogger("px_bypass.patchright_minter")
 
 LISTING_URL = (
     "https://www.zillow.com/homedetails/"
-    "9315-Parrot-Ave-Downey-CA-90240/21091004_zpid/"
+    "6910-Farragut-Ave-Falls-Church-VA-22042/51816594_zpid/"
 )
 
 PX_IFRAME_SELECTORS = [
@@ -125,7 +125,7 @@ class PatchrightMinter:
         self._browser = browser
         self._headless = headless
         self._timeout_s = timeout_s
-        self._sem = asyncio.Semaphore(3)  # limit concurrent contexts
+        self._sem = asyncio.Semaphore(8)  # limit concurrent contexts
 
     @classmethod
     async def create(
