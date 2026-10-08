@@ -71,6 +71,7 @@ def _parse_nearby_home(h: dict) -> dict:
         "status": h.get("homeStatus", "") or "",
         "latitude": h.get("latitude"),
         "longitude": h.get("longitude"),
+        "source_data": h,
     }
 
 
@@ -93,6 +94,7 @@ def _parse_price_event(e: dict) -> dict:
         "source": e.get("source", "") or "",
         "price_per_sqft": e.get("pricePerSquareFoot"),
         "price_change_rate": e.get("priceChangeRate"),
+        "source_data": e,
     }
 
 
@@ -111,6 +113,7 @@ def _parse_tax_event(e: dict) -> dict:
         "tax_increase_rate": e.get("taxIncreaseRate"),
         "value": e.get("value"),
         "value_increase_rate": e.get("valueIncreaseRate"),
+        "source_data": e,
     }
 
 

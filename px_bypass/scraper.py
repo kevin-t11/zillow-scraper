@@ -14,10 +14,12 @@ daemon) on the VM, or from Brave's keychain on a laptop dev box.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
 import time
+from collections.abc import AsyncIterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -117,7 +119,12 @@ def _build_request(zpid: str, slug: str, query_template: dict) -> tuple[str, dic
         "&submitFlowRequestSource=&ompDeviceType=WEB_DESKTOP"
         "&operationName=ForSaleNonPriorityQuery"
     )
-    body = json.loads(json.dumps(query_template))
+    # Only these two variable fields change; the safelisted query stays exact.
+    body = dict(query_template)
+    body["variables"] = dict(query_template["variables"])
+    body["variables"]["contactFormRenderParameter"] = dict(
+        query_template["variables"]["contactFormRenderParameter"]
+    )
     body["variables"]["zpid"] = int(zpid)
     body["variables"]["contactFormRenderParameter"]["zpid"] = int(zpid)
     headers = dict(HEADERS)
@@ -168,76 +175,82 @@ async def _fetch_one(
                 attempts=attempt - 1, zpid=zpid, url=listing_url,
             ), 0, "fail"
 
-        slot = None
-        active_proxy_client = proxy_client
-        active_sem = sem
-        if pool is not None:
-            slot = await pool.acquire()
-            cookies = slot.cookies
-            active_proxy_client = slot.client
-            active_sem = slot.sem
+        lease = pool.lease() if pool is not None else contextlib.nullcontext(None)
+        async with lease as slot:
+            active_proxy_client = proxy_client
+            active_sem = sem
+            if slot is not None:
+                cookies = slot.cookies
+                active_proxy_client = slot.client
+                active_sem = slot.sem
 
-        async with active_sem:
-            # ── Try DIRECT first (free) when not rate-limited
-            if state.direct_ok and not skip_direct:
+            async with (sem if pool is not None else contextlib.nullcontext()), active_sem:
+                # The slot may have died while this request waited for capacity.
+                if slot is not None and slot.dead:
+                    pool_misses += 1
+                    continue
+                # ── Try DIRECT first (free) when not rate-limited
+                if state.direct_ok and not skip_direct:
+                    try:
+                        status, content = await _attempt(direct_client, url, body, headers, cookies)
+                        if status == 200:
+                            try:
+                                j = json.loads(content)
+                            except Exception as e:
+                                last_err = f"direct JSON parse: {e}"; continue
+                            if "errors" in j and "data" not in j:
+                                last_err = (j.get('errors') or [{}])[0].get('message', '')
+                                continue
+                            listing = parse_for_sale_non_priority(j, listing_url=listing_url)
+                            listing.url = listing.url or listing_url
+                            listing.attempts = attempt
+                            return listing, len(content), "direct"
+                        if status == 403:
+                            # Direct rate-limited — disable direct path for 60s
+                            state.disable_direct_for(60.0)
+                            last_err = "direct 403"
+                            # fall through to proxy attempt
+                        elif status == 404:
+                            last_err = "direct 404"
+                            break
+                        else:
+                            last_err = f"direct HTTP {status}"
+                    except Exception as e:
+                        last_err = f"direct {type(e).__name__}: {e}"
+                        state.disable_direct_for(30.0)
+
+                # ── Fall back to PROXY (Evomi residential)
+                if active_proxy_client is None:
+                    continue
                 try:
-                    status, content = await _attempt(direct_client, url, body, headers, cookies)
+                    status, content = await _attempt(active_proxy_client, url, body, headers, cookies)
                     if status == 200:
                         try:
                             j = json.loads(content)
                         except Exception as e:
-                            last_err = f"direct JSON parse: {e}"; continue
+                            last_err = f"proxy JSON parse: {e}"; continue
                         if "errors" in j and "data" not in j:
                             last_err = (j.get('errors') or [{}])[0].get('message', '')
                             continue
                         listing = parse_for_sale_non_priority(j, listing_url=listing_url)
+                        listing.url = listing.url or listing_url
                         listing.attempts = attempt
-                        return listing, len(content), "direct"
+                        state.record_proxy_success()
+                        return listing, len(content), "proxy"
                     if status == 403:
-                        # Direct rate-limited — disable direct path for 60s
-                        state.disable_direct_for(60.0)
-                        last_err = "direct 403"
-                        # fall through to proxy attempt
-                    elif status == 404:
-                        last_err = "direct 404"
+                        last_err = "proxy 403"
+                        if pool is not None and slot is not None:
+                            pool.mark_dead(slot)
+                            pool_misses += 1
+                            continue  # don't count as a real attempt
+                        state.record_proxy_block()
                         break
-                    else:
-                        last_err = f"direct HTTP {status}"
+                    if status == 404:
+                        last_err = "proxy 404"
+                        break
+                    last_err = f"proxy HTTP {status}"
                 except Exception as e:
-                    last_err = f"direct {type(e).__name__}: {e}"
-                    state.disable_direct_for(30.0)
-
-            # ── Fall back to PROXY (Evomi residential)
-            if active_proxy_client is None:
-                continue
-            try:
-                status, content = await _attempt(active_proxy_client, url, body, headers, cookies)
-                if status == 200:
-                    try:
-                        j = json.loads(content)
-                    except Exception as e:
-                        last_err = f"proxy JSON parse: {e}"; continue
-                    if "errors" in j and "data" not in j:
-                        last_err = (j.get('errors') or [{}])[0].get('message', '')
-                        continue
-                    listing = parse_for_sale_non_priority(j, listing_url=listing_url)
-                    listing.attempts = attempt
-                    state.record_proxy_success()
-                    return listing, len(content), "proxy"
-                if status == 403:
-                    last_err = "proxy 403"
-                    if pool is not None and slot is not None:
-                        pool.mark_dead(slot)
-                        pool_misses += 1
-                        continue  # don't count as a real attempt
-                    state.record_proxy_block()
-                    break
-                if status == 404:
-                    last_err = "proxy 404"
-                    break
-                last_err = f"proxy HTTP {status}"
-            except Exception as e:
-                last_err = f"proxy {type(e).__name__}: {e}"
+                    last_err = f"proxy {type(e).__name__}: {e}"
             real_attempts += 1
 
     status = (
@@ -254,7 +267,7 @@ async def _fetch_one(
 
 
 async def scrape_urls_via_px(
-    urls: Iterable[str],
+    urls: Iterable[str] | AsyncIterable[str],
     *,
     cookies: Optional[dict] = None,
     proxy_url: Optional[str] = None,
@@ -270,7 +283,9 @@ async def scrape_urls_via_px(
         raise SystemExit("Pass either pool=CookiePool or cookies={'_px3': ...}")
     cookies = cookies or {}
 
-    proxy_url = proxy_url or (resolve_proxy_url(proxy_backend) if use_proxy_fallback else "")
+    proxy_url = proxy_url or (
+        resolve_proxy_url(proxy_backend) if use_proxy_fallback and pool is None else ""
+    )
     logger.info(
         "Cookies=%d  proxy_fallback=%s",
         len(cookies),
@@ -278,10 +293,11 @@ async def scrape_urls_via_px(
     )
 
     query_template = json.loads(QUERY_TEMPLATE_PATH.read_text())
-    urls_list = list(urls)
+    if concurrency < 1:
+        raise ValueError("concurrency must be positive")
     sem = asyncio.Semaphore(concurrency)
     state = _State()
-    stats = ScrapeStats(total=len(urls_list))
+    stats = ScrapeStats()
     t0 = time.monotonic()
 
     limits = httpx.Limits(
@@ -294,25 +310,43 @@ async def scrape_urls_via_px(
         http2=True, follow_redirects=True, proxy=proxy_url, limits=limits,
     ) if proxy_url else None
 
+    results: list[PropertyListing] = []
+    queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=concurrency)
+
+    async def _produce():
+        if isinstance(urls, AsyncIterable):
+            iterator = aiter(urls)
+            try:
+                async for url in iterator:
+                    await queue.put(url)
+                    stats.total += 1
+            finally:
+                close = getattr(iterator, "aclose", None)
+                if close is not None:
+                    await close()
+        else:
+            for url in urls:
+                await queue.put(url)
+                stats.total += 1
+        for _ in range(concurrency):
+            await queue.put(None)
+
     async with direct_ctx as direct_client:
-        try:
-            tasks = [
-                _fetch_one(
-                    direct_client, proxy_ctx, u, cookies, query_template,
+        async def _worker():
+            while True:
+                url = await queue.get()
+                if url is None:
+                    return
+                listing, size, path = await _fetch_one(
+                    direct_client, proxy_ctx, url, cookies, query_template,
                     sem, state, max_retries, skip_direct, pool,
                 )
-                for u in urls_list
-            ]
-            results: list[PropertyListing] = []
-            for fut in asyncio.as_completed(tasks):
-                listing, size, path = await fut
                 results.append(listing)
                 stats.bytes_total += size
                 if path == "direct":
                     stats.direct_success += 1
                 elif path == "proxy":
                     stats.proxy_success += 1
-
                 if listing.status == "success":
                     stats.success += 1
                 elif listing.status == "blocked":
@@ -321,7 +355,15 @@ async def scrape_urls_via_px(
                     stats.not_found += 1
                 else:
                     stats.other_error += 1
+
+        tasks = [asyncio.create_task(_produce())]
+        tasks.extend(asyncio.create_task(_worker()) for _ in range(concurrency))
+        try:
+            await asyncio.gather(*tasks)
         finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             if proxy_ctx is not None:
                 await proxy_ctx.aclose()
 

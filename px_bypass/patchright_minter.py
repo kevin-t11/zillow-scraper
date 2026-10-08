@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import time
 from urllib.parse import unquote, urlparse
@@ -125,7 +126,7 @@ class PatchrightMinter:
         self._browser = browser
         self._headless = headless
         self._timeout_s = timeout_s
-        self._sem = asyncio.Semaphore(8)  # limit concurrent contexts
+        self._sem = asyncio.Semaphore(max(1, int(os.getenv("MINT_CONCURRENCY", "8"))))
 
     @classmethod
     async def create(
@@ -134,7 +135,7 @@ class PatchrightMinter:
         pw = await async_playwright().start()
         browser = await pw.chromium.launch(
             headless=headless,
-            channel="chrome",
+            channel=os.getenv("BROWSER_CHANNEL", "chrome") or None,
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
@@ -142,8 +143,8 @@ class PatchrightMinter:
         )
         return cls(pw, browser, headless=headless, timeout_s=timeout_s)
 
-    async def mint(self) -> dict:
-        session_id = make_session_id()
+    async def mint(self, *, session_id: str | None = None) -> dict:
+        session_id = session_id or make_session_id()
         async with self._sem:
             context = await self._browser.new_context(
                 proxy=_proxy_arg(session_id),

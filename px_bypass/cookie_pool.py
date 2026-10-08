@@ -1,5 +1,5 @@
 """
-Cookie pool — rotates across N independent PX cookie sets so we can
+Cookie pool — balances work across N independent PX cookie sets so we can
 sustain bulk scrapes past the per-cookie wear limit.
 
 Each slot pairs a PX cookie set with a sticky Evomi session (one exit
@@ -13,6 +13,7 @@ On a 403 the slot is marked dead and a background task refreshes it.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ import httpx
 
 from .proxy import EvomiConfig, build_proxy_url, make_session_id
 
-Minter = Callable[[], Awaitable[dict]]
+Minter = Callable[..., Awaitable[dict]]
 
 logger = logging.getLogger("px_bypass.cookie_pool")
 
@@ -46,6 +47,7 @@ class CookieSlot:
     hits: int = 0
     dead: bool = False
     refreshing: bool = False
+    pending: int = 0
 
 
 class CookiePool:
@@ -189,19 +191,19 @@ class CookiePool:
 
     async def _mint(self, idx: int) -> CookieSlot:
         old = self._slots[idx]
+        session_id = make_session_id()
         try:
-            cookies = await self._mint_fn()
+            cookies = await self._mint_fn(session_id=session_id)
         except Exception as e:
             logger.warning("pool[%d] mint failed: %s", idx, e)
             self._slots[idx] = None
             raise
-        if "JSESSIONID" not in cookies:
+        if "JSESSIONID" not in cookies and "_px3" not in cookies:
             self._slots[idx] = None
             raise RuntimeError(f"pool[{idx}] no usable session in {list(cookies)}")
         if "_px3" not in cookies:
             logger.info("pool[%d] minted without _px3 (PX not challenging)", idx)
 
-        session_id = make_session_id()
         client = self._build_client(session_id)
         slot = CookieSlot(
             idx=idx, cookies=cookies, session_id=session_id,
@@ -215,18 +217,33 @@ class CookiePool:
             asyncio.create_task(_close_later(old.client))
         return slot
 
-    async def acquire(self) -> CookieSlot:
-        """Round-robin pick a live slot. Awaits a refresh if all are dead."""
+    async def acquire(self, *, reserve: bool = False) -> CookieSlot:
+        """Pick a live slot; leases reserve load, existing raw callers do not."""
         while True:
             async with self._lock:
+                candidates = []
                 for _ in range(self._size):
                     self._cursor = (self._cursor + 1) % self._size
                     s = self._slots[self._cursor]
                     if s is not None and not s.dead:
-                        s.hits += 1
-                        return s
+                        candidates.append(s)
+                if candidates:
+                    s = min(candidates, key=lambda slot: slot.pending)
+                    self._cursor = s.idx
+                    if reserve:
+                        s.pending += 1
+                    s.hits += 1
+                    return s
                 self._refreshed.clear()
             await self._refreshed.wait()
+
+    @asynccontextmanager
+    async def lease(self):
+        slot = await self.acquire(reserve=True)
+        try:
+            yield slot
+        finally:
+            slot.pending -= 1
 
     def mark_dead(self, slot: CookieSlot) -> None:
         if slot.dead:

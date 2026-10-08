@@ -1,0 +1,31 @@
+{
+  "source": "Lightsail production source snapshot",
+  "verified_date": "2026-10-08",
+  "original_remote": "https://github.com/ushixan/zillow-scraper.git",
+  "deployed_base_commit": "f2b060e2ee268a8541652181b1f8028ee23857e0",
+  "sha256": {
+    "app/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "app/config.py": "0fbdaafd7d695d359ac75abad69d8b6130f8d16ed0f2b8b7071a27ec9ac0b24f",
+    "app/models.py": "ffd863b08e02fce3f8c420b015789e65a0e399f622cd2c20f82f2e4a0e28719e",
+    "app/proxy.py": "680c3787575864998a13bc26482c9bf02c1070753c07b33bade6a62e94d0f181",
+    "app/scraper.py": "d84946e54bd88341ed3b8db8724d264fb10e2804ace6a00282c1ff111e4ca006",
+    "app/server.py": "3575cac5e5fa3acec30a32a96e68783f637294012dd81104682b748b6dffbe6e",
+    "px_bypass/__init__.py": "1e07d05b1413e91568bf35985a32a4e01dcdbb689945eb8c4860e429f0503389",
+    "px_bypass/cache.py": "274f0bb4a9d9ac95686d41518283f55a99e758560394abd102e8d02b5218ece0",
+    "px_bypass/cookie_pool.py": "aa1bf1fba98dd61ee7be68438e4e4d280f88afe7e312849a77d94b4d3ae49a78",
+    "px_bypass/parser.py": "45d093169b852115051554dd65ffef0b375b33595f5538707c81700bdc01284c",
+    "px_bypass/patchright_minter.py": "7f8716f55cea496d47ba9b82695007a3896d60e16fe631b7dceaaf9ab3b67157",
+    "px_bypass/proxy.py": "ab2cdb7d83a6c0dfe702c6bee5cf96df92891d65c262c587f2977487c64aede1",
+    "px_bypass/queries/for_sale_non_priority.json": "20087e90707e231a65464ca456aecf23edc1850cc393221f2bb15a8e3b9e33cb",
+    "px_bypass/resolver.py": "55ed217ddba03ed2e1b04c755c2bd12bf63217a0d7e454a3a838b9073d0a5161",
+    "px_bypass/routes.py": "3baccfca350f6c22e549c777426646f8a9a03be3276525351495c57d58c31313",
+    "px_bypass/scraper.py": "0f28cec1eb0abc70f1f71d8623fd21952b47bb2f6dafbe062e70a2e49ecdce1f",
+    "px_bypass/search.py": "f5159cabab78b3138c3457a64aaba10e6659ad0867c5bacae8ccfd4e175a4808",
+    "px_bypass/serve.py": "5c4ba89ee59bc7f1d7c286de6d8d9c5b7195531961bf997d99ee1cf58ede3fa8",
+    "px_bypass/systemd-zillow.service": "660b496b22941cc337385ac0f5f7b684f4e3d56c81303f8c98703a1fe69c8599",
+    "px_bypass/test_addresses.py": "054f0aaa475a05aeb88ca9f2fd5394742cc0f3b7c60c31fd6db0a0f559e12f31",
+    "px_bypass/test_urls.py": "eff1bc44ac172f29f60812a48a7b892ac7413009baf31d472b4f3e285ae0b273",
+    "requirements.txt": "dfb664a98f7ff8e3e1b7954c3110dd8e99f65494ff6bea7913637e452e9ee927",
+    "run.py": "51a8e62bd5ae88e28f56644b3b4d2f369ee39c3fda80af6a436f02b43029481f"
+  }
+}

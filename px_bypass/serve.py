@@ -13,7 +13,7 @@ Routes live in `routes.py`. This module only owns process bootstrap.
 Environment:
     API_HOST              0.0.0.0
     API_PORT              8000
-    POOL_SIZE             8       (cookies in rotation)
+    POOL_SIZE             24      (cookies in rotation)
     POOL_PER_SLOT_C       5       (concurrent reqs per cookie)
     HEADLESS              true    (set "false" on a desktop for debugging)
     EVOMI_USERNAME        required
@@ -28,6 +28,7 @@ import os
 
 import uvicorn
 from fastapi import FastAPI
+from starlette.middleware.gzip import GZipMiddleware
 
 from .cookie_pool import CookiePool
 from .patchright_minter import PatchrightMinter
@@ -57,6 +58,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Zillow PX Bypass", version="2.0", lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=3)
 app.include_router(router)
 
 
@@ -65,6 +67,7 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     uvicorn.run(
         "px_bypass.serve:app",
         host=os.getenv("API_HOST", "0.0.0.0"),

@@ -135,9 +135,22 @@ def addresses_match(input_addr: str, zillow_street: str, zillow_state: str, zill
 # ZPID Resolution
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def get_zpid_via_autocomplete(client: httpx.AsyncClient, address: str) -> Optional[tuple[str, str]]:
+def get_address_unit(value: str) -> str | None:
+    """Normalize an explicitly marked apartment, unit, space, or lot ID."""
+    match = re.search(
+        r"(?:\b(?:unit|apt|apartment|suite|ste|space|spc|lot)\b|#)\s*([A-Za-z0-9][A-Za-z0-9/-]*)",
+        value.split(",", 1)[0], re.IGNORECASE,
+    )
+    return match.group(1).upper().replace("-", "") if match else None
+
+
+async def get_zpid_via_autocomplete(
+    client: httpx.AsyncClient, address: str, *, prefer_full_address: bool = False,
+) -> Optional[tuple[str, str]]:
     parsed = parse_input_address(address)
     street = parsed["full_street"]
+
+    requested_unit = get_address_unit(address) if prefer_full_address else None
 
     queries = [street]
     if parsed["zipcode"]:
@@ -148,11 +161,16 @@ async def get_zpid_via_autocomplete(client: httpx.AsyncClient, address: str) -> 
         if short_street != street:
             queries.insert(0, short_street)
 
+    if prefer_full_address:
+        # Give the precise address first chance, retaining broader fallbacks.
+        queries = list(dict.fromkeys([address.strip(), *queries]))
+
     url = "https://www.zillowstatic.com/autocomplete/v3/suggestions"
 
     for query in queries:
         try:
-            params = {"q": query, "resultTypes": "allAddress", "resultCount": 5}
+            params = {"q": query, "resultTypes": "allAddress",
+                      "resultCount": 12 if requested_unit else 5}
             resp = await client.get(url, params=params, headers=_random_headers(), timeout=15)
             if resp.status_code != 200:
                 continue
@@ -164,6 +182,13 @@ async def get_zpid_via_autocomplete(client: httpx.AsyncClient, address: str) -> 
                     continue
                 zpid = str(zpid)
                 display = r.get("display", "")
+
+                candidate_unit = (
+                    str(meta.get("unitNumber") or "").upper().replace("-", "")
+                    or get_address_unit(display)
+                )
+                if requested_unit and candidate_unit != requested_unit:
+                    continue
 
                 inp_num = parsed["street_number"]
                 if inp_num and not display.strip().startswith(inp_num):

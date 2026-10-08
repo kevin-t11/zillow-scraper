@@ -21,9 +21,11 @@ import logging
 import os
 
 import uvicorn
+from dotenv import load_dotenv
 
 
 def main() -> None:
+    load_dotenv()
     parser = argparse.ArgumentParser(description="Zillow PX-Bypass API server")
     parser.add_argument("--host", default=os.getenv("API_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.getenv("API_PORT", "8000")))
@@ -45,6 +47,9 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
 
+    # Bulk batches otherwise emit thousands of upstream request log lines.
+    logging.getLogger("httpx").setLevel(logging.DEBUG if args.verbose else logging.WARNING)
+
     print()
     print("  Zillow PX-Bypass API")
     print(f"  http://{args.host}:{args.port}")
@@ -54,6 +59,7 @@ def main() -> None:
     print("  Endpoints:")
     print("    GET  /info                  - service metadata + endpoint catalog")
     print("    GET  /health                - cookie pool stats")
+    print("    POST /v2/search/listings    - discover listings by market/filter")
     print("    POST /v2/scrape/urls        - scrape Zillow listing URLs directly")
     print("    POST /v2/scrape/addresses   - resolve addresses → scrape")
     print("    GET  /docs                  - Swagger UI")

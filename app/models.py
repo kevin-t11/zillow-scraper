@@ -2,7 +2,8 @@
 models.py — Data models (Pydantic for API, dataclass for internal)
 """
 
-from dataclasses import dataclass, field, asdict
+from copy import deepcopy
+from dataclasses import dataclass, field, asdict, fields
 from typing import Optional
 from pydantic import BaseModel, Field
 
@@ -122,7 +123,8 @@ class PropertyListing:
     raw_json: dict = field(default_factory=dict, repr=False)
 
     def to_dict(self, include_raw: bool = False) -> dict:
-        d = asdict(self)
-        if not include_raw:
-            d.pop("raw_json", None)
-        return d
+        if include_raw:
+            return asdict(self)
+        # Avoid copying a potentially large upstream payload just to discard it.
+        return {f.name: deepcopy(getattr(self, f.name))
+                for f in fields(self) if f.name != "raw_json"}
