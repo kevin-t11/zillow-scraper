@@ -9,6 +9,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.models import PropertyListing
@@ -95,7 +96,8 @@ def _pool(request: Request) -> "CookiePool":
     if pool is None:
         raise HTTPException(503, "Server is still booting — pool not ready.")
     if pool.stats["live"] == 0:
-        raise HTTPException(503, "Cookie pool empty — all slots refreshing.")
+        raise HTTPException(503, "No validated scraping session is available; recovery is in progress.",
+                            headers={"Retry-After": "60"})
     return pool
 
 
@@ -179,12 +181,13 @@ async def info() -> dict:
 
 
 @router.get("/health")
-async def health(request: Request) -> dict:
+async def health(request: Request):
     pool = request.app.state.pool
-    return {
+    payload = {
         "status": "ok" if pool.stats["live"] > 0 else "no-cookies",
         **pool.stats,
     }
+    return JSONResponse(payload, status_code=200 if pool.stats["live"] > 0 else 503)
 
 
 def _zpid_of(url: str) -> str | None:

@@ -28,17 +28,21 @@ class EvomiConfig:
     port: int
     username: str
     password: str
+    scheme: str = "http"
 
     @classmethod
     def from_env(cls) -> "EvomiConfig":
         load_dotenv()
         host = os.getenv("EVOMI_HOST", "rp.evomi.com")
         port = int(os.getenv("EVOMI_PORT", "1000"))
+        scheme = os.getenv("EVOMI_SCHEME", "https" if port == 1001 else "http").lower()
+        if scheme not in {"http", "https"}:
+            raise ValueError("EVOMI_SCHEME must be http or https")
         user = os.getenv("EVOMI_USERNAME") or ""
         pw = os.getenv("EVOMI_PASSWORD") or ""
         if not user or not pw:
             raise SystemExit("Set EVOMI_USERNAME and EVOMI_PASSWORD in .env")
-        return cls(host=host, port=port, username=user, password=pw)
+        return cls(host=host, port=port, username=user, password=pw, scheme=scheme)
 
 
 def make_session_id() -> str:
@@ -59,7 +63,7 @@ def build_proxy_url(
         pw_parts.append(f"session-{session}")
         pw_parts.append(f"lifetime-{lifetime_min}")
     pw = "_".join(pw_parts)
-    return f"http://{cfg.username}:{quote(pw, safe='_-')}@{cfg.host}:{cfg.port}"
+    return f"{cfg.scheme}://{quote(cfg.username, safe='_-')}:{quote(pw, safe='_-')}@{cfg.host}:{cfg.port}"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -112,7 +116,7 @@ def resolve_proxy_url(backend: str = "evomi") -> str:
 def split_proxy_url(url: str) -> dict:
     p = urlparse(url)
     return {
-        "server": f"http://{p.hostname}:{p.port}",
+        "server": f"{p.scheme}://{p.hostname}:{p.port}",
         "username": unquote(p.username or ""),
         "password": unquote(p.password or ""),
     }

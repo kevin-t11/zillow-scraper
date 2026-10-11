@@ -58,7 +58,7 @@ def _proxy_arg(session_id: str) -> dict:
     proxy_url = build_proxy_url(evomi, session=session_id, country="US", lifetime_min=30)
     p = urlparse(proxy_url)
     return {
-        "server": f"http://{p.hostname}:{p.port}",
+        "server": f"{p.scheme}://{p.hostname}:{p.port}",
         "username": unquote(p.username or ""),
         "password": unquote(p.password or ""),
     }

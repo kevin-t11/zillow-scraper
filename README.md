@@ -69,7 +69,8 @@ Create `.env` in the project root:
 EVOMI_USERNAME=...
 EVOMI_PASSWORD=...
 EVOMI_HOST=rp.evomi.com    # default
-EVOMI_PORT=1000            # default
+EVOMI_PORT=1000            # default; HTTPS uses 1001
+EVOMI_SCHEME=http          # HTTPS endpoints require https (inferred for port 1001)
 ```
 
 ## Run
@@ -174,6 +175,8 @@ Response:
 ```json
 {"status": "ok", "size": 8, "live": 8, "mints": 8, "refreshes": 0}
 ```
+
+Health returns HTTP 200 when at least one validated listing session is available, otherwise HTTP 503. Evomi connectivity alone does not prove that Zillow permits listing retrieval. Sessions must pass a real property check before entering the pool.
 
 ## Tuning
 

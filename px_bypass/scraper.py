@@ -27,7 +27,7 @@ from typing import Iterable, Optional
 import httpx
 
 from app.models import PropertyListing
-from .cookie_pool import CookiePool
+from .cookie_pool import CookiePool, PoolUnavailableError
 from .parser import parse_for_sale_non_priority
 from .proxy import resolve_proxy_url
 
@@ -150,6 +150,33 @@ async def _fetch_one(
     state: _State,
     max_retries: int = 3,
     skip_direct: bool = False,
+    pool: Optional[CookiePool] = None,
+) -> tuple[PropertyListing, int, str]:
+    if pool is not None and state.halted:
+        try:
+            _, zpid = parse_listing_url(listing_url)
+        except ValueError:
+            zpid = ""
+        return PropertyListing(input_address=listing_url, url=listing_url, zpid=zpid,
+                               status="blocked", error_msg="No validated scraping session is available"), 0, "fail"
+    try:
+        return await _fetch_one_impl(direct_client, proxy_client, listing_url,
+                                     cookies, query_template, sem, state,
+                                     max_retries, skip_direct, pool)
+    except PoolUnavailableError as exc:
+        state.halted = True
+        try:
+            _, zpid = parse_listing_url(listing_url)
+        except ValueError:
+            zpid = ""
+        return PropertyListing(input_address=listing_url, url=listing_url, zpid=zpid,
+                               status="blocked", error_msg=str(exc)), 0, "fail"
+
+
+async def _fetch_one_impl(
+    direct_client: httpx.AsyncClient, proxy_client: Optional[httpx.AsyncClient],
+    listing_url: str, cookies: dict, query_template: dict, sem: asyncio.Semaphore,
+    state: _State, max_retries: int = 3, skip_direct: bool = False,
     pool: Optional[CookiePool] = None,
 ) -> tuple[PropertyListing, int, str]:
     """Returns (listing, bytes_received, path: 'direct'|'proxy'|'fail')."""

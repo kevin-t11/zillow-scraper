@@ -272,7 +272,7 @@ Illustrative health response:
 }
 ```
 
-`size` is configured pool capacity, `live` is usable slots, `mints` counts successful fresh mints, `refreshes` counts refreshes, and `rehydrated` counts restored slots. Actual counters depend on startup and usage. When no slots are live, health returns HTTP 200 with `status: "no-cookies"`; check the body for readiness.
+`size` is configured pool capacity, `live` is usable slots, `mints` counts successful fresh mints, `refreshes` counts refreshes, and `rehydrated` counts restored slots. Actual counters depend on startup and usage. Health returns HTTP 200 only when a session has fetched a validation property successfully. When no validated slots are live, it returns HTTP 503 with `status: "no-cookies"`. `refreshing`, `validation_failures`, and `last_error` describe recovery. Uncached scrape requests return HTTP 503 with `Retry-After: 60` while unavailable. If all sessions fail during a batch, session acquisition waits at most 30 seconds before remaining rows receive `status: "blocked"`. Recovery retries pause for 60 seconds after a failure. Persisted sessions expire after 25 minutes by default and are validated again at startup.
 
 `/info` returns `name`, `version`, `description`, and an `endpoints` array with request schemas and examples.
 

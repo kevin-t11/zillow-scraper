@@ -350,6 +350,7 @@ class PoolSchedulingTests(unittest.IsolatedAsyncioTestCase):
         pool._slots = [CookieSlot(
             idx=i, cookies={}, session_id=str(i), client=None,
             sem=asyncio.Semaphore(1), minted_at=0,
+            validated=True,
         ) for i in range(2)]
         return pool
 

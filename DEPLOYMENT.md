@@ -10,7 +10,7 @@ GitHub repository depends on the account's access.
 
 ## Snapshot matching the running service
 
-On 2026-10-08, all runtime source files were compared against
+On 2026-10-11, all runtime source files were compared against
 `/home/ubuntu/zillow-scraper` on Lightsail at `3.210.35.141`. The source matches
 the running service, including the VM's previously uncommitted
 `px_bypass/search.py`, its route and schema, and the address and URL performance
@@ -27,8 +27,7 @@ access:
 python -m unittest discover -s tests -v
 ```
 
-All 28 tests passed locally and on the staged VM build. Publishing this snapshot
-does not restart the running service or alter its Git checkout.
+All 38 tests passed locally and on the staged VM build. The October 11 recovery update was deployed directly and the service restarted. Repository publication does not change the VM Git checkout.
 
 ## Run the deployed performance profile
 
@@ -61,7 +60,7 @@ result's status and count distinct successful ZPIDs rather than equating input
 rows with unique successful properties. See [API.md](API.md) for full requests,
 caching behavior, failure handling, and benchmark commands.
 
-## Post deployment validation
+## Successful benchmark on October 8
 
 | Endpoint | Successful distinct properties | Request cache hits | VM client elapsed | Server processing |
 |---|---:|---:|---:|---:|
@@ -83,3 +82,11 @@ The deployment rollback backup remains on the VM at
 previous files on that VM, run the saved `rollback.py` with its virtual
 environment Python and restart `zillow`. The backup and credentials are not part
 of this repository.
+
+## Recovery update on October 11
+
+The Evomi connection was changed to the user-provided Core Residential HTTPS endpoint, port 1001. Proxy URL builders now preserve the configured HTTP or HTTPS scheme for both browser and HTTP clients. Credentials were updated only in protected environment files.
+
+A session must fetch the known validation property before entering the pool. Health returns HTTP 503 while no validated sessions are available. Initial startup probes one session before creating the full pool, failed recovery attempts pause for 60 seconds, and waiting workers time out after 30 seconds. Persisted cookies expire after 25 minutes by default and are checked again before reuse. Fully cached responses retain their existing behavior.
+
+The new credentials authenticated successfully both locally and on the VM. Fresh-session validation still received Zillow HTTP 403 locally and on the VM. Both public scrape endpoints returned HTTP 503 with `Retry-After: 60`, and health reported zero validated sessions. The historical benchmark above does not establish current availability. No alternative provider was enabled. The VM rollback backup is `/home/ubuntu/zillow-deploy-backups/evomi-recovery-20261011T043943Z`; it contains the previous runtime files, environment file, session snapshot, and deployment manifest. These private backups are not committed.
