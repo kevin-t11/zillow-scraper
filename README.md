@@ -15,7 +15,7 @@ On 2026-10-11, an uncached VM test fetched 100 distinct properties in 8.68s,
 with 100/100 expected ZPIDs matched and all eight Evomi sessions validating.
 The deployed API subsequently returned all 1,000 expected unique listings for
 both endpoints with caches disabled: addresses in 24.04s and URLs in 37.79s
-from the public client. See [DEPLOYMENT.md](DEPLOYMENT.md) for processing times
+from the public client. See [deployment history](deploy/HISTORY.md) for processing times
 and verification details. These measurements are not latency or availability
 guarantees.
 

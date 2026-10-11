@@ -1,159 +1,186 @@
-# Deployed source and configuration
+# Deploy to Lightsail
 
-The maintained repository is <https://github.com/kevin-t11/zillow-scraper>.
-Both the local checkout and Lightsail checkout originally used
-<https://github.com/ushixan/zillow-scraper.git> as their `origin` remote. This
-repository retains that source history, including the deployed checkout's base
-commit `f2b060e2ee268a8541652181b1f8028ee23857e0` and the subsequent startup fixes.
-The original remote is retained locally as `upstream`; availability of that
-GitHub repository depends on the account's access.
+Deployment is manual: push a commit to GitHub, upload that same commit over
+SSH, test it on the VM, then restart the service. A GitHub push alone does not
+deploy the application. Run one deployment at a time.
 
-## Snapshot matching the running service
+| Setting | Value |
+|---|---|
+| Repository / branch | [kevin-t11/zillow-scraper](https://github.com/kevin-t11/zillow-scraper) / `main` |
+| SSH target | `ubuntu@3.210.35.141` |
+| SSH key on Kevin's Mac | `/Users/kevin/.ssh/zillow_cloud.pem` |
+| Application | `/home/ubuntu/zillow-scraper` |
+| Service / Python | `zillow` / `/home/ubuntu/zillow-scraper/venv/bin/python` |
+| Public API | `http://3.210.35.141` |
 
-On 2026-10-11, all runtime source files were compared against
-`/home/ubuntu/zillow-scraper` on Lightsail at `3.210.35.141`. The source matches
-the running service, including the VM's previously uncommitted
-`px_bypass/search.py`, its route and schema, and the address and URL performance
-changes. SHA-256 values are recorded in
-[`deploy/runtime-manifest.json`](deploy/runtime-manifest.json).
+This guide updates the existing VM. Its `.env`, nginx, and systemd configuration
+remain in place. Keep credentials in the VM's `.env`. The configured pool uses
+24 HTTP sessions and 10 requests per session; the default path needs no browser.
+Original source history is retained from `ushixan/zillow-scraper`.
 
-The repository additionally contains the regression tests, reproducible
-benchmark tools, and current API documentation. Configuration secrets,
-environment backups, saved session cookies, virtual environments, and generated
-benchmark output are excluded. Tests do not require proxy credentials or network
-access:
+## 1. Test and push — on your Mac
 
 ```bash
-python -m unittest discover -s tests -v
+cd /Users/kevin/Depot/Projects/zillow_scraper
+git status --short
+.venv/bin/python -m unittest discover -s tests -q
+git diff --check
 ```
 
-All 49 current tests passed locally and on the staged VM build. The October 11 recovery update was deployed directly and the service restarted. Repository publication does not change the VM Git checkout.
-
-## Run the deployed performance profile
-
-Install the dependencies from `requirements.txt`, install the browser with
-`patchright install chrome`, and supply the required Evomi settings through your
-own `.env` file as described in the README. Then run:
+Refresh the recorded runtime hashes before committing:
 
 ```bash
-python run.py --pool-size 24 --per-slot-c 10
+.venv/bin/python - <<'PY'
+import hashlib, json
+from datetime import date
+from pathlib import Path
+p = Path('deploy/runtime-manifest.json')
+m = json.loads(p.read_text())
+for name in m['sha256']:
+    m['sha256'][name] = hashlib.sha256(Path(name).read_bytes()).hexdigest()
+m['verified_date'] = date.today().isoformat()
+p.write_text(json.dumps(m, indent=2) + '\n')
+PY
 ```
 
-The deployed VM uses 24 sessions, at most 10 concurrent property requests per
-session, and mint concurrency 2. Code defaults to 5 requests per session unless
-overridden; specifying 10 is necessary to reproduce the tested pool profile.
-The live service uses the virtual environment at
-`/home/ubuntu/zillow-scraper/venv`, binds to `127.0.0.1:8000`, and runs under the
-`zillow` systemd service. The included systemd unit is a template; adjust its
-paths and user to match a new deployment.
+Review and stage the intended changes, then push. Skip `git add` and `git commit`
+if the release is already committed.
 
-| Endpoint | Default listing concurrency | Default resolution concurrency |
-|---|---:|---:|
-| `/v2/scrape/urls` | 240 | Not applicable |
-| `/v2/scrape/addresses` | 120 | 100 |
-| `/v2/search/listings` | 60 | Search concurrency 4 |
+```bash
+git add app px_bypass tests deploy run.py requirements.txt README.md API.md DEPLOYMENT.md
+git commit -m "Describe your change"
+git push origin main
+git status --short
+git rev-parse HEAD
+git ls-remote origin refs/heads/main
+```
 
-For fresh property retrieval, use `cache_seconds: 0`. Start with one batch of
-1,000 inputs, allow 120–180 seconds of client timeout, and enable automatic gzip
-decompression. Avoid overlapping large batches on the current VM. Read each
-result's status and count distinct successful ZPIDs rather than equating input
-rows with unique successful properties. See [API.md](API.md) for full requests,
-caching behavior, failure handling, and benchmark commands.
+Continue when the working tree is clean and the two commit hashes match.
 
-## Successful benchmark on October 8
+## 2. Upload — on your Mac
 
-| Endpoint | Successful distinct properties | Request cache hits | VM client elapsed | Server processing |
-|---|---:|---:|---:|---:|
-| Addresses | 1,000 | 0 | 19.89 seconds | 18.47 seconds |
-| URLs | 1,000 | 0 | 34.33 seconds | 32.18 seconds |
+The archive contains committed application files. It excludes `.env`, local
+virtual environments, saved sessions, and benchmark output.
 
-Both runs matched every expected property ID and returned no failed rows.
-Timings include full response receipt and JSON parsing on the VM, and exclude
-external internet transfer and service startup. The URL run included session
-refreshes. These are individual observations rather than a latency guarantee.
+```bash
+git archive --format=tar.gz --output=/tmp/zillow-release.tar.gz HEAD \
+  app px_bypass tests deploy run.py requirements.txt README.md API.md DEPLOYMENT.md
+git rev-parse HEAD > /tmp/zillow-commit.txt
+scp -i /Users/kevin/.ssh/zillow_cloud.pem \
+  /tmp/zillow-release.tar.gz /tmp/zillow-commit.txt ubuntu@3.210.35.141:/tmp/
+ssh -i /Users/kevin/.ssh/zillow_cloud.pem ubuntu@3.210.35.141
+```
 
-Live cache population, cache hits, and cache bypass passed for both scrape
-endpoints. Search preview and search detail retrieval also passed. The final
-health check reported all 24 sessions live. On restart, expired sessions can take
-several minutes to replace; in-memory property and resolution caches clear.
+Run the remaining steps in the same SSH terminal. If any command fails, resolve
+the error before continuing.
 
-The deployment rollback backup remains on the VM at
-`/home/ubuntu/zillow-deploy-backups/deploy-20261008T035828Z`. To restore those
-previous files on that VM, run the saved `rollback.py` with its virtual
-environment Python and restart `zillow`. The backup and credentials are not part
-of this repository.
+## 3. Stage and test — on Lightsail
 
-## Recovery update on October 11
+Build a separate Python environment for this release. This keeps dependency
+changes away from the running service and allows code and dependencies to roll
+back together. Keep this release folder after deployment.
 
-The Evomi connection was changed to the user-provided Core Residential HTTPS endpoint, port 1001. Proxy URL builders now preserve the configured HTTP or HTTPS scheme for both browser and HTTP clients. Credentials were updated only in protected environment files.
+```bash
+set -e
+APP=/home/ubuntu/zillow-scraper
+RELEASE=/home/ubuntu/zillow-deploy-backups/$(date -u +%Y%m%dT%H%M%SZ)
+mkdir -p "$RELEASE/stage" "$RELEASE/previous"
+tar -xzf /tmp/zillow-release.tar.gz -C "$RELEASE/stage"
+cp /tmp/zillow-commit.txt "$RELEASE/commit.txt"
+python3 -m venv "$RELEASE/venv"
+"$RELEASE/venv/bin/python" -m pip install -r "$RELEASE/stage/requirements.txt"
+cd "$RELEASE/stage"
+"$RELEASE/venv/bin/python" -m unittest discover -s tests -q
+```
 
-A session must fetch the known validation property before entering the pool. Health returns HTTP 503 while no validated sessions are available. Initial startup probes one session before creating the full pool, failed recovery attempts pause for 60 seconds, and waiting workers time out after 30 seconds. Persisted cookies expire after 25 minutes by default and are checked again before reuse. Fully cached responses retain their existing behavior.
+If Ubuntu reports that `venv` is unavailable, install `python3-venv` first.
 
-The new credentials authenticated successfully both locally and on the VM. Fresh-session validation still received Zillow HTTP 403 locally and on the VM. Both public scrape endpoints returned HTTP 503 with `Retry-After: 60`, and health reported zero validated sessions. The historical benchmark above does not establish current availability. No alternative provider was enabled. The VM rollback backup is `/home/ubuntu/zillow-deploy-backups/evomi-recovery-20261011T043943Z`; it contains the previous runtime files, environment file, session snapshot, and deployment manifest. These private backups are not committed.
+## 4. Back up, install, and restart — on Lightsail
 
-A later automatic retry obtained one validated session. Both public endpoints then returned all 10 expected distinct properties with `cache_seconds: 0` and zero cache hits: addresses in 3.00 seconds and URLs in 2.28 seconds, measured from the local client including response parsing. The pool remained at 1 of 24 validated sessions, so this is partial recovery and does not establish current 1,000-listing performance or sustained availability. A diagnostic browser session received a fresh `_px3` cookie but both its page and GraphQL request still returned HTTP 403; cookie presence alone cannot establish access. No cookie values were edited.
+This briefly interrupts the API. Save the printed release path for rollback.
+Only the listed code folders are synchronized; the VM's configuration stays in place.
 
+```bash
+for item in app px_bypass tests deploy run.py requirements.txt README.md API.md DEPLOYMENT.md; do
+  cp -a "$APP/$item" "$RELEASE/previous/"
+done
+printf 'Release and rollback folder: %s\n' "$RELEASE"
+sudo systemctl stop zillow
+mv "$APP/venv" "$RELEASE/previous-venv"
+ln -s "$RELEASE/venv" "$APP/venv"
+for dir in app px_bypass tests deploy; do
+  rsync -a --delete "$RELEASE/stage/$dir/" "$APP/$dir/"
+done
+for file in run.py requirements.txt README.md API.md DEPLOYMENT.md; do
+  cp "$RELEASE/stage/$file" "$APP/$file"
+done
+sudo systemctl start zillow
+```
 
-## HTTP session correction on October 11
+## 5. Verify — on Lightsail
 
-A controlled comparison found that replaying browser-generated risk cookies
-returned a challenge, while the same current listing request through the same
-Evomi connection with a fresh cookie jar returned full property data. Five
-unique properties passed both the current site GET query and the existing POST
-query. The POST retained the photos expected by the existing response schema.
-A VM test then fetched 100/100 unique properties in 8.68 seconds through eight
-validated sessions, without application caches or imported browser cookies.
+```bash
+systemctl is-active zillow
+cat "$RELEASE/commit.txt"
+cd "$APP"
+"$APP/venv/bin/python" - <<'PY'
+import hashlib, json
+from pathlib import Path
+m = json.loads(Path('deploy/runtime-manifest.json').read_text())
+bad = [p for p, h in m['sha256'].items()
+       if hashlib.sha256(Path(p).read_bytes()).hexdigest() != h]
+assert not bad, f'Runtime files differ: {bad}'
+print('All recorded runtime hashes match')
+PY
+curl --fail --silent --show-error http://127.0.0.1:8000/health \
+  || echo 'Check health again after startup finishes.'
+```
 
-The default pool now uses validated HTTP sessions and preserves cookies set by
-the server. Browser risk-cookie sessions are skipped when restoring this pool.
-Session age is enforced during runtime; malformed responses and 403s consume
-the retry budget. The optional legacy browser path uses isolated process
-workers, a hard deadline, and bounded cleanup. The API starts after the first
-validated session and fills the remaining slots in the background.
+Startup may take a minute or longer while sessions are validated. Repeat the
+health check until `status` is `ok`. Wait for `live: 24` before a full-speed
+batch. For startup errors, run `sudo journalctl -u zillow -n 80 --no-pager`.
 
+Test both public endpoints with caching disabled:
 
-Final deployed verification, with `cache_seconds: 0`:
+```bash
+curl --fail --silent --show-error --compressed --max-time 180 \
+  http://3.210.35.141/v2/scrape/urls \
+  -H 'Content-Type: application/json' \
+  -d '{"urls":["https://www.zillow.com/homedetails/51816594_zpid/"],"cache_seconds":0}'
 
-| Endpoint | Unique successful listings | Expected IDs matched | Route processing | Public client total |
-|---|---:|---|---:|---:|
-| Addresses | 1,000 / 1,000 | All | 15.80 s | 24.04 s |
-| URLs | 1,000 / 1,000 | All | 28.13 s | 37.79 s |
+curl --fail --silent --show-error --compressed --max-time 180 \
+  http://3.210.35.141/v2/scrape/addresses \
+  -H 'Content-Type: application/json' \
+  -d '{"addresses":["6910 Farragut Ave, Falls Church, VA 22042"],"cache_seconds":0}'
+```
 
-Public totals include response receipt and JSON parsing. Both runs returned
-zero blocked rows and zero application cache hits. All 24 HTTP sessions remained
-validated. These observations do not establish a 10–20-second end-to-end SLA.
-The same 1,000 original inputs were retained: unit-marked addresses now try
-Zillow's `#` notation while still requiring an exact unit match. This resolved
-`Unit 1111N` without accepting nearby apartments.
+Each response should contain one successful listing with ZPID `51816594`, zero
+blocks, and zero cache hits. Check the listing result as well as the HTTP status.
+See [API.md](API.md) for bulk benchmarks and request settings.
 
-The final rollback backup is `/home/ubuntu/zillow-deploy-backups/http-sessions-20261011T083528Z`. Runtime hashes matched the deployed
-files, and 49 regression tests passed locally and on the VM. Secrets and
-runtime session data remain outside Git.
+## Rollback — on Lightsail
 
+This rollback applies to releases created by this guide. Set `APP` and `RELEASE`
+again if using a new SSH terminal; use the release path saved in step 4. The
+first check requires the previous Python environment to have been saved.
 
-## HTTPS proxy TLS performance correction on October 11
+```bash
+set -e
+test -e "$RELEASE/previous-venv/bin/python"
+sudo systemctl stop zillow
+for dir in app px_bypass tests deploy; do
+  rsync -a --delete "$RELEASE/previous/$dir/" "$APP/$dir/"
+done
+for file in run.py requirements.txt README.md API.md DEPLOYMENT.md; do
+  cp "$RELEASE/previous/$file" "$APP/$file"
+done
+test -L "$APP/venv" && rm "$APP/venv"
+mv "$RELEASE/previous-venv" "$APP/venv"
+sudo systemctl start zillow
+```
 
-The pool now shares the verified HTTPS proxy TLS configuration between its
-clients. This avoids repeatedly loading certificate stores while opening
-connections. Sticky proxy sessions and cookies remain separate, and both
-proxy and origin certificate verification remain enabled. Request schemas,
-listing fields, cache behavior, and concurrency defaults are unchanged.
+Repeat the health and endpoint checks. Retain release folders while the active
+environment or a rollback environment still references them.
 
-| Endpoint/run | Distinct successful listings | Route processing | Public client total |
-|---|---:|---:|---:|
-| Urls (1) | 1,000 / 1,000 | 13.47 s | 18.90 s |
-| Addresses (2) | 1,000 / 1,000 | 14.47 s | 20.71 s |
-| Urls (3) | 1,000 / 1,000 | 13.06 s | 20.42 s |
-
-All runs used `cache_seconds: 0`, matched every expected property ID, and
-completed each listing in one attempt with zero blocks. The same 1,000 unique
-properties were used across endpoints; both caches stayed empty. All 24
-sessions remained healthy. Public totals include complete response delivery
-and JSON parsing, and exclude startup. Responses retained all existing fields,
-including photos and price/tax histories. These are measured runs, not a latency
-guarantee; the repeat URL call took 20.42 seconds including internet transfer.
-
-All 50 regression tests passed locally and in the staged VM checkout. All 24
-runtime manifest hashes matched the deployed files. The rollback backup is
-`/home/ubuntu/zillow-deploy-backups/url-tls-speed-20261011T091111Z`. Benchmark details and
-calling guidance are in [API.md](API.md#https-proxy-connection-optimization-2026-10-11).
+Earlier benchmarks, deployment details, and backup locations are in
+[deployment history](deploy/HISTORY.md).
