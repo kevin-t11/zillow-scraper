@@ -1,13 +1,7 @@
-"""
-Cookie pool — balances work across N independent PX cookie sets so we can
-sustain bulk scrapes past the per-cookie wear limit.
+"""Validated Evomi HTTP sessions, with optional legacy browser session setup.
 
-Each slot pairs a PX cookie set with a sticky Evomi session (one exit
-IP for the cookie's lifetime) and a per-slot concurrency cap, so PX
-sees a serial-ish stream from one IP per session — the cookie lasts
-much longer than under concurrent multi-IP churn.
-
-On a 403 the slot is marked dead and a background task refreshes it.
+Ordinary HTTP sessions use the server's cookie jar. Importing browser risk
+cookies can turn an otherwise successful public listing request into a 403.
 """
 
 from __future__ import annotations
@@ -64,6 +58,7 @@ class CookieSlot:
     refreshing: bool = False
     pending: int = 0
     validated: bool = False
+    last_success_at: float | None = None
 
 
 class CookiePool:
@@ -78,8 +73,10 @@ class CookiePool:
         persist_ttl_s: float = DEFAULT_PERSIST_TTL_S,
         session_wait_s: float = 30.0,
         retry_delay_s: float = 60.0,
+        prefer_http_sessions: bool = True,
     ):
         self._mint_fn = mint
+        self._prefer_http_sessions = prefer_http_sessions
         self._size = size
         self._per_slot_c = per_slot_concurrency
         self._evomi = evomi_cfg or EvomiConfig.from_env()
@@ -102,6 +99,9 @@ class CookiePool:
         self._closing = False
         self._validation_failures = 0
         self._last_error: str | None = None
+        self._recovery_active = False
+        self._last_recovery_started_at: float | None = None
+        self._last_recovery_completed_at: float | None = None
 
     @classmethod
     async def create(
@@ -112,12 +112,14 @@ class CookiePool:
         per_slot_concurrency: int = 5,
         persist_path: Optional[Path] = None,
         persist_ttl_s: float = DEFAULT_PERSIST_TTL_S,
+        prefer_http_sessions: bool = True,
     ) -> "CookiePool":
         pool = cls(
             mint, size,
             per_slot_concurrency=per_slot_concurrency,
             persist_path=persist_path,
             persist_ttl_s=persist_ttl_s,
+            prefer_http_sessions=prefer_http_sessions,
         )
 
         # ── Try to rehydrate from disk first
@@ -147,29 +149,18 @@ class CookiePool:
                 pool._last_error = _failure_reason(exc)
                 pool._retry_after = time.monotonic() + pool._retry_delay_s
                 pool._schedule_refresh(0)
+                pool._spawn(pool._maintain())
                 logger.warning("no validated sessions; API will report unavailable and retry with backoff")
                 return pool
 
-        # Mint any slot that wasn't rehydrated, retry failed slots up to 2x
-        # so boot is deterministic at full pool size in prod.
-        for attempt in range(3):
-            idxs_to_mint = [i for i in range(size) if pool._slots[i] is None]
-            if not idxs_to_mint:
-                break
-            results = await asyncio.gather(
-                *[pool._mint(i) for i in idxs_to_mint], return_exceptions=True,
-            )
-            new_live = sum(1 for r in results if isinstance(r, CookieSlot))
-            logger.info("mint attempt %d: %d/%d slots succeeded",
-                        attempt + 1, new_live, len(idxs_to_mint))
-            if new_live == len(idxs_to_mint):
-                break
-
+        # Serve after the first validated slot; fill the pool with bounded,
+        # serialized background recovery instead of blocking startup for minutes.
         live = sum(1 for s in pool._slots if s is not None and not s.dead)
         logger.info("cookie pool ready: %d/%d live (rehydrated=%d, fresh=%d)",
                     live, size, rehydrated, pool._mints)
         pool._persist_to_disk()
         pool._schedule_missing()
+        pool._spawn(pool._maintain())
         return pool
 
     async def _validate_slot(self, slot: CookieSlot) -> None:
@@ -177,8 +168,8 @@ class CookiePool:
         from .scraper import QUERY_TEMPLATE_PATH, _build_request
         zpid = "51816594"  # the same property used to establish the browser session
         url, body, headers = _build_request(zpid, "6910-Farragut-Ave-Falls-Church-VA-22042", json.loads(QUERY_TEMPLATE_PATH.read_text()))
-        response = await slot.client.post(url, json=body, headers=headers,
-                                          cookies=slot.cookies, timeout=15)
+        response = await slot.client.post(url, json=body, headers=headers, timeout=15,
+                                          **({"cookies": slot.cookies} if slot.cookies else {}))
         if response.status_code != 200:
             raise SessionValidationError(f"Validation listing returned HTTP {response.status_code}")
         try:
@@ -187,6 +178,23 @@ class CookiePool:
             prop = {}
         if not isinstance(prop, dict) or str(prop.get("zpid")) != zpid:
             raise SessionValidationError("Validation response did not contain the requested property")
+        slot.last_success_at = time.time()
+
+    def usable(self, slot: CookieSlot, *, now: float | None = None) -> bool:
+        now = time.time() if now is None else now
+        return (slot.validated and not slot.dead
+                and 0 <= now - slot.minted_at < self._persist_ttl_s)
+
+    def _expire_slots(self) -> None:
+        now = time.time()
+        for slot in self._slots:
+            if slot is not None and not slot.dead and now - slot.minted_at >= self._persist_ttl_s:
+                self.mark_dead(slot, reason="session age limit")
+
+    async def _maintain(self) -> None:
+        while not self._closing:
+            self._expire_slots()
+            await asyncio.sleep(min(15.0, max(0.01, self._persist_ttl_s / 2)))
 
     def _spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -223,10 +231,12 @@ class CookiePool:
             minted_at = entry.get("minted_at", 0)
             cookies = entry.get("cookies") or {}
             session_id = entry.get("session_id")
-            if (idx is None or idx >= self._size or "_px3" not in cookies
+            if (not isinstance(idx, int) or idx < 0 or idx >= self._size
+                    or not isinstance(cookies, dict) or not session_id
                     or now - minted_at > self._persist_ttl_s):
                 continue
-            session_id = session_id or make_session_id()
+            if self._prefer_http_sessions and "_px3" in cookies:
+                continue
             client = self._build_client(session_id)
             self._slots[idx] = CookieSlot(
                 idx=idx, cookies=cookies, session_id=session_id,
@@ -249,7 +259,7 @@ class CookiePool:
                         "session_id": s.session_id,
                         "cookies": s.cookies,
                     }
-                    for s in self._slots if s is not None and not s.dead and s.validated
+                    for s in self._slots if s is not None and self.usable(s)
                 ],
             }
             tmp = self._persist_path.with_suffix(".tmp")
@@ -273,27 +283,25 @@ class CookiePool:
     async def _mint(self, idx: int) -> CookieSlot:
         old = self._slots[idx]
         session_id = make_session_id()
+        started_at = time.time()
         try:
-            cookies = await self._mint_fn(session_id=session_id)
+            cookies = {} if self._prefer_http_sessions else await self._mint_fn(session_id=session_id)
         except Exception as e:
             logger.warning("pool[%d] mint failed (%s)", idx, type(e).__name__)
             self._slots[idx] = None
             if old is not None:
                 self._spawn(_close_later(old.client))
             raise
-        if "JSESSIONID" not in cookies and "_px3" not in cookies:
+        if not self._prefer_http_sessions and "JSESSIONID" not in cookies and "_px3" not in cookies:
             self._slots[idx] = None
             if old is not None:
                 self._spawn(_close_later(old.client))
             raise RuntimeError(f"pool[{idx}] no usable session in {list(cookies)}")
-        if "_px3" not in cookies:
-            logger.info("pool[%d] minted without _px3 (PX not challenging)", idx)
-
         client = self._build_client(session_id)
         slot = CookieSlot(
             idx=idx, cookies=cookies, session_id=session_id,
             client=client, sem=asyncio.Semaphore(self._per_slot_c),
-            minted_at=time.time(),
+            minted_at=started_at,
         )
         try:
             await self._validate_slot(slot)
@@ -320,11 +328,12 @@ class CookiePool:
         deadline = time.monotonic() + self._session_wait_s
         while not self._closing:
             async with self._lock:
+                self._expire_slots()
                 candidates = []
                 for _ in range(self._size):
                     self._cursor = (self._cursor + 1) % self._size
                     s = self._slots[self._cursor]
-                    if s is not None and not s.dead and s.validated:
+                    if s is not None and self.usable(s):
                         candidates.append(s)
                 if candidates:
                     s = min(candidates, key=lambda slot: slot.pending)
@@ -351,11 +360,11 @@ class CookiePool:
         finally:
             slot.pending -= 1
 
-    def mark_dead(self, slot: CookieSlot) -> None:
+    def mark_dead(self, slot: CookieSlot, *, reason: str = "upstream rejected session") -> None:
         if slot.dead:
             return
         slot.dead = True
-        logger.info("pool[%d] dead after %d hits — scheduling refresh", slot.idx, slot.hits)
+        logger.info("pool[%d] unavailable (%s); %d leases — scheduling refresh", slot.idx, reason, slot.hits)
         self._schedule_refresh(slot.idx)
 
     async def _refresh(self, idx: int) -> None:
@@ -367,6 +376,8 @@ class CookiePool:
                     delay = self._retry_after - time.monotonic()
                     if delay > 0:
                         await asyncio.sleep(delay)
+                    self._recovery_active = True
+                    self._last_recovery_started_at = time.time()
                     try:
                         await self._mint(idx)
                     except Exception as exc:
@@ -380,6 +391,9 @@ class CookiePool:
                         self._schedule_missing()
                         logger.info("pool[%d] validated and refreshed", idx)
                         return
+                    finally:
+                        self._recovery_active = False
+                        self._last_recovery_completed_at = time.time()
         finally:
             self._refreshing_indices.discard(idx)
             self._refreshed.set()
@@ -398,16 +412,22 @@ class CookiePool:
 
     @property
     def stats(self) -> dict:
-        live = sum(1 for s in self._slots if s and not s.dead and s.validated)
+        live_slots = [s for s in self._slots if s and self.usable(s)]
         return {
             "size": self._size,
-            "live": live,
+            "live": len(live_slots),
             "mints": self._mints,
             "refreshes": self._refreshes,
             "rehydrated": self._rehydrated,
             "refreshing": len(self._refreshing_indices),
             "validation_failures": self._validation_failures,
             "last_error": self._last_error,
+            "recovery_active": self._recovery_active,
+            "last_recovery_started_at": self._last_recovery_started_at,
+            "last_recovery_completed_at": self._last_recovery_completed_at,
+            "oldest_session_age_s": round(max(time.time() - s.minted_at for s in live_slots), 1) if live_slots else None,
+            "last_success_at": max((s.last_success_at or 0 for s in live_slots), default=None),
+            "session_strategy": "http" if self._prefer_http_sessions else "browser",
         }
 
 

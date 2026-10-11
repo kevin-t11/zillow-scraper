@@ -135,12 +135,15 @@ def addresses_match(input_addr: str, zillow_street: str, zillow_state: str, zill
 # ZPID Resolution
 # ─────────────────────────────────────────────────────────────────────────────
 
+_UNIT_RE = re.compile(
+    r"(?:\b(?:unit|apt|apartment|suite|ste|space|spc|lot)\b|#)\s*([A-Za-z0-9][A-Za-z0-9/-]*)",
+    re.IGNORECASE,
+)
+
+
 def get_address_unit(value: str) -> str | None:
     """Normalize an explicitly marked apartment, unit, space, or lot ID."""
-    match = re.search(
-        r"(?:\b(?:unit|apt|apartment|suite|ste|space|spc|lot)\b|#)\s*([A-Za-z0-9][A-Za-z0-9/-]*)",
-        value.split(",", 1)[0], re.IGNORECASE,
-    )
+    match = _UNIT_RE.search(value.split(",", 1)[0])
     return match.group(1).upper().replace("-", "") if match else None
 
 
@@ -163,7 +166,13 @@ async def get_zpid_via_autocomplete(
 
     if prefer_full_address:
         # Give the precise address first chance, retaining broader fallbacks.
-        queries = list(dict.fromkeys([address.strip(), *queries]))
+        exact_queries = [address.strip()]
+        if requested_unit:
+            # Zillow can interpret "Unit 1111N" as a prefix search and omit
+            # that exact unit. Its # notation retains the apartment identity.
+            street_part, separator, rest = address.strip().partition(",")
+            exact_queries.insert(0, _UNIT_RE.sub(r"#\1", street_part, count=1) + separator + rest)
+        queries = list(dict.fromkeys([*exact_queries, *queries]))
 
     url = "https://www.zillowstatic.com/autocomplete/v3/suggestions"
 

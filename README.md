@@ -6,62 +6,47 @@ its Git history is retained. Runtime code in this snapshot matches the deployed
 Lightsail service, including market search and both listing performance updates.
 See [DEPLOYMENT.md](DEPLOYMENT.md) for configuration and verification.
 
-High-throughput Zillow scraper that bypasses PerimeterX (HUMAN Bot Defender)
-press-and-hold protection without paying for a captcha solver. Uses a patched
-Chromium to mint wide-scope `_px3` cookies through an Evomi residential proxy,
-then replays the cookies via concurrent `httpx` against Zillow's
-`ForSaleNonPriorityQuery` GraphQL endpoint.
+Fetches public Zillow listing details through validated Evomi residential HTTP
+sessions. The default path starts with a fresh HTTP cookie jar and retains
+cookies set by the server. It does not import browser-generated `_px3` cookies:
+controlled tests found that those cookies turned successful requests into 403s.
 
-**Validated URL benchmark:** 2500 URLs in 119.8s — 100% success — 20.88 listings/sec.
-
-**Local address benchmark (2026-10-08):** 1,000 distinct listings in 12.38s end to end, both caches disabled, 1,000/1,000 expected ZPIDs matched. Used 32 ready sessions at 10 requests per slot, fetch concurrency 300, and resolve concurrency 200. Inputs were prevalidated resolvable addresses; this is an observed run, not a latency guarantee.
+On 2026-10-11, an uncached VM test fetched 100 distinct properties in 8.68s,
+with 100/100 expected ZPIDs matched and all eight Evomi sessions validating.
+The deployed API subsequently returned all 1,000 expected unique listings for
+both endpoints with caches disabled: addresses in 24.04s and URLs in 37.79s
+from the public client. See [DEPLOYMENT.md](DEPLOYMENT.md) for processing times
+and verification details. These measurements are not latency or availability
+guarantees.
 
 ## Architecture
 
-```
-                     ┌─────────────────────────┐
-                     │  patchright + Evomi     │  free, ~17s/mint
-                     │  (mints _px3 cookies)   │  no captcha service
-                     └────────────┬────────────┘
-                                  │
-                          ┌───────▼────────┐
-                          │  CookiePool    │  N slots, sticky proxy
-                          │  per slot      │  per-slot concurrency cap
-                          └───────┬────────┘     auto-refresh on 403
-                                  │
-                ┌─────────────────▼──────────────────┐
-                │  scrape_urls_via_px (httpx + h2)   │  ~21 listings/sec
-                │  ForSaleNonPriorityQuery GraphQL   │  full property data
-                └────────────────────────────────────┘
+```text
+addresses → autocomplete → listing URLs
+                               ↓
+              validated Evomi HTTP session pool
+                               ↓
+                ForSaleNonPriorityQuery → full listing data
 ```
 
-### Why each piece exists
+The pool validates each session against a known property, limits concurrent
+requests per session, expires sessions during runtime, and replaces rejected
+sessions with backoff. The API starts after its first usable session; remaining
+slots fill in the background. Failed JSON, GraphQL errors, and 403 responses all
+count against the request budget.
 
-- **patchright** — a maintained patched Playwright that hides the automation
-  flags vanilla Playwright/Camoufox leak. PX accepts its fingerprint, so a
-  fresh `_px3` cookie is minted on a normal page load (no press-and-hold
-  challenge needed in our testing). Free, no per-mint cost.
-
-- **Evomi residential proxy** — every request (mint + replay) routes through
-  a residential exit IP. Sticky session per cookie slot, so PX sees one IP
-  per session token instead of churn across ASNs.
-
-- **Cookie pool** — PX flags a `_px3` token after a few hundred hits. We mint
-  N cookies up front, route work to the least-loaded slot, and on 403 mark the slot dead and
-  schedule a background mint. Per-slot concurrency cap prevents bursts from
-  burning a cookie prematurely.
-
-- **`ForSaleNonPriorityQuery`** — Zillow's GraphQL endpoint for full listing
-  detail (schools, price history, tax history, nearby homes). Body must be a
-  byte-exact match against Zillow's safelist; the verbatim 34 KB query is
-  in `px_bypass/queries/for_sale_non_priority.json`.
+The legacy browser session path remains available to Python callers with
+`prefer_http_sessions=False`. Browser workers have hard process deadlines so a
+frozen renderer cannot stall recovery. Browsers are unnecessary for the default
+HTTP session path.
 
 ## Setup
 
 ```bash
 pip install -r requirements.txt
-patchright install chrome
 ```
+
+For the optional legacy browser path, also run `patchright install chrome`.
 
 Create `.env` in the project root:
 
@@ -86,8 +71,8 @@ python run.py --reload                 # auto-reload on code change
 ```
 
 `run.py` is the single entry point. On startup it boots `px_bypass.serve:app`
-which launches one patched Chromium, mints `--pool-size` cookies in parallel
-via Evomi (~50s for 8 cookies), then serves the API.
+which validates an Evomi HTTP session, serves the API, and fills `--pool-size`
+slots in the background. `/health` reports live slots and recovery timestamps.
 
 ### Bulk CLI test
 
@@ -111,7 +96,7 @@ at `http://localhost:8000/docs` after the server starts.
 | Endpoint | Input | Notes |
 |---|---|---|
 | `POST /v2/search/listings` | Market and filters | Discover listings and optionally fetch full details |
-| `POST /v2/scrape/urls` | Zillow listing URLs | Direct scrape via cookie pool |
+| `POST /v2/scrape/urls` | Zillow listing URLs | Fetch details via validated session pool |
 | `POST /v2/scrape/addresses` | Street addresses | Resolves via Zillow autocomplete while fetching completed resolutions |
 | `GET /health` | — | Pool stats |
 

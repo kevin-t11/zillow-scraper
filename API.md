@@ -19,7 +19,7 @@ Start the server after completing the setup in [README.md](README.md):
 python run.py
 ```
 
-The server initializes its browser and cookie pool before accepting requests. The current default pool size is 24, with 5 concurrent requests per slot. Startup time varies.
+The server validates an Evomi HTTP session before accepting requests and fills the rest of the pool in the background. The current default pool size is 24, with 5 concurrent requests per slot. Startup time varies. Browser-generated risk cookies are not imported by the default HTTP path.
 
 The application defines no API key or authentication header. A deployment may add authentication through its reverse proxy. POST requests use `Content-Type: application/json`. Clients advertising `Accept-Encoding: gzip` receive compressed responses larger than 1 KiB; clients requesting `identity` receive plain JSON. Compression preserves all result fields. Both scrape endpoints wait for completion and return JSON; they do not stream or return a job ID.
 
@@ -272,7 +272,7 @@ Illustrative health response:
 }
 ```
 
-`size` is configured pool capacity, `live` is usable slots, `mints` counts successful fresh mints, `refreshes` counts refreshes, and `rehydrated` counts restored slots. Actual counters depend on startup and usage. Health returns HTTP 200 only when a session has fetched a validation property successfully. When no validated slots are live, it returns HTTP 503 with `status: "no-cookies"`. `refreshing`, `validation_failures`, and `last_error` describe recovery. Uncached scrape requests return HTTP 503 with `Retry-After: 60` while unavailable. If all sessions fail during a batch, session acquisition waits at most 30 seconds before remaining rows receive `status: "blocked"`. Recovery retries pause for 60 seconds after a failure. Persisted sessions expire after 25 minutes by default and are validated again at startup.
+`size` is configured pool capacity, `live` is usable slots, `mints` counts successful fresh mints, `refreshes` counts refreshes, and `rehydrated` counts restored slots. Actual counters depend on startup and usage. Health returns HTTP 200 only when a session has fetched a validation property successfully. When no validated slots are live, it returns HTTP 503 with `status: "no-cookies"`. `refreshing`, `validation_failures`, and `last_error` describe recovery. Uncached scrape requests return HTTP 503 with `Retry-After: 60` while unavailable. If all sessions fail during a batch, session acquisition waits at most 30 seconds before remaining rows receive `status: "blocked"`. Recovery retries pause for 60 seconds after a failure. Sessions expire after 25 minutes by default during runtime and are validated again when restored at startup. `session_strategy` identifies the HTTP or legacy browser path. `recovery_active`, `last_recovery_started_at`, and `last_recovery_completed_at` expose recovery progress; `oldest_session_age_s` and `last_success_at` describe usable sessions. Validation is a point-in-time check, not a guarantee that the next request will succeed. Every actual network attempt, including 403 and invalid JSON responses, consumes `max_retries`.
 
 `/info` returns `name`, `version`, `description`, and an `endpoints` array with request schemas and examples.
 

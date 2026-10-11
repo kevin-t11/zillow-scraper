@@ -136,7 +136,8 @@ async def _attempt(
     client: httpx.AsyncClient, url: str, body: dict, headers: dict, cookies: dict,
 ) -> tuple[int, bytes]:
     """Single POST. Returns (status, body_bytes)."""
-    r = await client.post(url, json=body, headers=headers, cookies=cookies, timeout=30)
+    r = await client.post(url, json=body, headers=headers, timeout=30,
+                          **({"cookies": cookies} if cookies else {}))
     return r.status_code, r.content
 
 
@@ -173,123 +174,111 @@ async def _fetch_one(
                                status="blocked", error_msg=str(exc)), 0, "fail"
 
 
+def _parse_requested_listing(content: bytes, listing_url: str, zpid: str) -> PropertyListing:
+    try:
+        payload = json.loads(content)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("response was not valid JSON") from exc
+    data = payload.get("data") if isinstance(payload, dict) else None
+    prop = data.get("property") if isinstance(data, dict) else None
+    if not isinstance(prop, dict) or str(prop.get("zpid")) != zpid:
+        raise ValueError("response did not contain the requested property")
+    return parse_for_sale_non_priority(payload, listing_url=listing_url)
+
+
 async def _fetch_one_impl(
     direct_client: httpx.AsyncClient, proxy_client: Optional[httpx.AsyncClient],
     listing_url: str, cookies: dict, query_template: dict, sem: asyncio.Semaphore,
     state: _State, max_retries: int = 3, skip_direct: bool = False,
     pool: Optional[CookiePool] = None,
 ) -> tuple[PropertyListing, int, str]:
-    """Returns (listing, bytes_received, path: 'direct'|'proxy'|'fail')."""
+    """Bound every network attempt, including rejected and malformed responses."""
     try:
         slug, zpid = parse_listing_url(listing_url)
-    except ValueError as e:
-        return PropertyListing(
-            input_address=listing_url, status="error", error_msg=str(e),
-        ), 0, "fail"
+    except ValueError as exc:
+        return PropertyListing(input_address=listing_url, status="error", error_msg=str(exc)), 0, "fail"
 
     url, body, headers = _build_request(zpid, slug, query_template)
     last_err = ""
-
-    real_attempts = 0
+    attempts = 0
     pool_misses = 0
-    attempt = 0
-    while real_attempts < max_retries and pool_misses < max_retries * 4:
-        attempt += 1
-        if pool is None and state.halted:
-            return PropertyListing(
-                input_address=listing_url, status="blocked",
-                error_msg="halted: cookies expired",
-                attempts=attempt - 1, zpid=zpid, url=listing_url,
-            ), 0, "fail"
-
+    terminal_status = None
+    while attempts < max_retries and pool_misses < max_retries * 4:
+        if state.halted:
+            terminal_status = "blocked"
+            last_err = last_err or "No validated scraping session is available"
+            break
         lease = pool.lease() if pool is not None else contextlib.nullcontext(None)
-        async with lease as slot:
-            active_proxy_client = proxy_client
-            active_sem = sem
-            if slot is not None:
-                cookies = slot.cookies
-                active_proxy_client = slot.client
-                active_sem = slot.sem
-
-            async with (sem if pool is not None else contextlib.nullcontext()), active_sem:
-                # The slot may have died while this request waited for capacity.
-                if slot is not None and slot.dead:
-                    pool_misses += 1
-                    continue
-                # ── Try DIRECT first (free) when not rate-limited
-                if state.direct_ok and not skip_direct:
-                    try:
-                        status, content = await _attempt(direct_client, url, body, headers, cookies)
+        try:
+            async with lease as slot:
+                active_proxy_client = slot.client if slot is not None else proxy_client
+                active_sem = slot.sem if slot is not None else sem
+                if slot is not None:
+                    cookies = slot.cookies
+                async with (sem if pool is not None else contextlib.nullcontext()), active_sem:
+                    # Expiration can happen while waiting for either semaphore.
+                    if slot is not None and not pool.usable(slot):
+                        pool.mark_dead(slot, reason="session expired or rejected while queued")
+                        pool_misses += 1
+                        continue
+                    clients = []
+                    if state.direct_ok and not skip_direct:
+                        clients.append(("direct", direct_client))
+                    if active_proxy_client is not None:
+                        clients.append(("proxy", active_proxy_client))
+                    if not clients:
+                        last_err = "No request transport is available"
+                        break
+                    for path, client in clients:
+                        if attempts >= max_retries:
+                            break
+                        attempts += 1
+                        try:
+                            status, content = await _attempt(client, url, body, headers, cookies)
+                        except Exception as exc:
+                            last_err = f"{path} {type(exc).__name__}"
+                            if path == "direct":
+                                state.disable_direct_for(30.0)
+                            continue
                         if status == 200:
                             try:
-                                j = json.loads(content)
-                            except Exception as e:
-                                last_err = f"direct JSON parse: {e}"; continue
-                            if "errors" in j and "data" not in j:
-                                last_err = (j.get('errors') or [{}])[0].get('message', '')
+                                listing = _parse_requested_listing(content, listing_url, zpid)
+                            except ValueError as exc:
+                                last_err = f"{path}: {exc}"
                                 continue
-                            listing = parse_for_sale_non_priority(j, listing_url=listing_url)
                             listing.url = listing.url or listing_url
-                            listing.attempts = attempt
-                            return listing, len(content), "direct"
-                        if status == 403:
-                            # Direct rate-limited — disable direct path for 60s
-                            state.disable_direct_for(60.0)
-                            last_err = "direct 403"
-                            # fall through to proxy attempt
-                        elif status == 404:
-                            last_err = "direct 404"
+                            listing.attempts = attempts
+                            if path == "proxy":
+                                state.record_proxy_success()
+                                if slot is not None:
+                                    slot.last_success_at = time.time()
+                            return listing, len(content), path
+                        last_err = f"{path} HTTP {status}"
+                        if status == 404:
+                            terminal_status = "not_found"
                             break
-                        else:
-                            last_err = f"direct HTTP {status}"
-                    except Exception as e:
-                        last_err = f"direct {type(e).__name__}: {e}"
-                        state.disable_direct_for(30.0)
-
-                # ── Fall back to PROXY (Evomi residential)
-                if active_proxy_client is None:
-                    continue
-                try:
-                    status, content = await _attempt(active_proxy_client, url, body, headers, cookies)
-                    if status == 200:
-                        try:
-                            j = json.loads(content)
-                        except Exception as e:
-                            last_err = f"proxy JSON parse: {e}"; continue
-                        if "errors" in j and "data" not in j:
-                            last_err = (j.get('errors') or [{}])[0].get('message', '')
-                            continue
-                        listing = parse_for_sale_non_priority(j, listing_url=listing_url)
-                        listing.url = listing.url or listing_url
-                        listing.attempts = attempt
-                        state.record_proxy_success()
-                        return listing, len(content), "proxy"
-                    if status == 403:
-                        last_err = "proxy 403"
-                        if pool is not None and slot is not None:
-                            pool.mark_dead(slot)
-                            pool_misses += 1
-                            continue  # don't count as a real attempt
-                        state.record_proxy_block()
+                        if status == 403:
+                            if path == "direct":
+                                state.disable_direct_for(60.0)
+                            else:
+                                if pool is not None and slot is not None:
+                                    pool.mark_dead(slot)
+                                else:
+                                    state.record_proxy_block()
+                                break
+                    if terminal_status:
                         break
-                    if status == 404:
-                        last_err = "proxy 404"
-                        break
-                    last_err = f"proxy HTTP {status}"
-                except Exception as e:
-                    last_err = f"proxy {type(e).__name__}: {e}"
-            real_attempts += 1
+        except PoolUnavailableError as exc:
+            state.halted = True
+            terminal_status = "blocked"
+            last_err = f"{last_err}; {exc}" if last_err else str(exc)
+            break
 
-    status = (
-        "blocked" if "403" in last_err
-        else "not_found" if "404" in last_err
-        else "error"
-    )
+    status = terminal_status or ("blocked" if "403" in last_err else "error")
     return PropertyListing(
         input_address=listing_url, status=status, error_msg=last_err,
-        attempts=max_retries, zpid=zpid, url=listing_url,
+        attempts=attempts, zpid=zpid, url=listing_url,
     ), 0, "fail"
-
 
 
 

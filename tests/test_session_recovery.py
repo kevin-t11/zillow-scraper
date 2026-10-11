@@ -37,7 +37,7 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.directory.cleanup)
         self.pool = CookiePool(AsyncMock(return_value={'_px3': 'test'}), 2,
                                evomi_cfg=CONFIG, persist_path=Path(self.directory.name)/'slots.json',
-                               session_wait_s=0.01, retry_delay_s=0.05)
+                               session_wait_s=0.01, retry_delay_s=0.05, prefer_http_sessions=False)
         self.addAsyncCleanup(self.pool.aclose)
 
     def client(self, response):
@@ -78,7 +78,8 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_startup_outage_probes_once_and_keeps_api_available(self):
         mint = AsyncMock(side_effect=RuntimeError('test'))
         with patch.object(EvomiConfig, 'from_env', return_value=CONFIG):
-            pool = await CookiePool.create(mint, 24, persist_path=Path(self.directory.name)/'startup.json')
+            pool = await CookiePool.create(mint, 24, persist_path=Path(self.directory.name)/'startup.json',
+                                            prefer_http_sessions=False)
         try:
             self.assertEqual(mint.await_count, 1)
             self.assertEqual(pool.stats['live'], 0)

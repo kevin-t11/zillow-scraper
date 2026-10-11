@@ -3,10 +3,9 @@ FastAPI server bootstrap.
 
     python -m px_bypass.serve
 
-Starts the API on $API_PORT (default 8000). At lifespan-startup it
-launches a single patched Chromium and mints an initial pool of
-$POOL_SIZE cookies via Evomi residential. Pool refreshes happen
-lazily, only when a cookie is flagged with 403.
+Starts the API on $API_PORT (default 8000) after validating the first Evomi
+HTTP session. The pool fills in the background and replaces rejected or
+expired sessions. Browser setup, when used, runs in isolated workers.
 
 Routes live in `routes.py`. This module only owns process bootstrap.
 
@@ -31,7 +30,7 @@ from fastapi import FastAPI
 from starlette.middleware.gzip import GZipMiddleware
 
 from .cookie_pool import CookiePool
-from .patchright_minter import PatchrightMinter
+from .session_worker import IsolatedMinter
 from .routes import router
 
 logger = logging.getLogger("px_bypass.serve")
@@ -43,8 +42,8 @@ async def lifespan(app: FastAPI):
     per_slot_c = int(os.getenv("POOL_PER_SLOT_C", "5"))
     headless = os.getenv("HEADLESS", "true").lower() != "false"
 
-    logger.info("launching patchright (headless=%s)…", headless)
-    minter = await PatchrightMinter.create(headless=headless)
+    logger.info("preparing isolated browser workers (headless=%s)…", headless)
+    minter = IsolatedMinter(headless=headless, timeout_s=float(os.getenv("MINT_TIMEOUT_S", "60")))
     logger.info("minting cookie pool of %d…", pool_size)
     pool = await CookiePool.create(minter.mint, pool_size, per_slot_concurrency=per_slot_c)
     app.state.minter = minter

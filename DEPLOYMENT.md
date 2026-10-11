@@ -27,7 +27,7 @@ access:
 python -m unittest discover -s tests -v
 ```
 
-All 38 tests passed locally and on the staged VM build. The October 11 recovery update was deployed directly and the service restarted. Repository publication does not change the VM Git checkout.
+All 49 current tests passed locally and on the staged VM build. The October 11 recovery update was deployed directly and the service restarted. Repository publication does not change the VM Git checkout.
 
 ## Run the deployed performance profile
 
@@ -92,3 +92,40 @@ A session must fetch the known validation property before entering the pool. Hea
 The new credentials authenticated successfully both locally and on the VM. Fresh-session validation still received Zillow HTTP 403 locally and on the VM. Both public scrape endpoints returned HTTP 503 with `Retry-After: 60`, and health reported zero validated sessions. The historical benchmark above does not establish current availability. No alternative provider was enabled. The VM rollback backup is `/home/ubuntu/zillow-deploy-backups/evomi-recovery-20261011T043943Z`; it contains the previous runtime files, environment file, session snapshot, and deployment manifest. These private backups are not committed.
 
 A later automatic retry obtained one validated session. Both public endpoints then returned all 10 expected distinct properties with `cache_seconds: 0` and zero cache hits: addresses in 3.00 seconds and URLs in 2.28 seconds, measured from the local client including response parsing. The pool remained at 1 of 24 validated sessions, so this is partial recovery and does not establish current 1,000-listing performance or sustained availability. A diagnostic browser session received a fresh `_px3` cookie but both its page and GraphQL request still returned HTTP 403; cookie presence alone cannot establish access. No cookie values were edited.
+
+
+## HTTP session correction on October 11
+
+A controlled comparison found that replaying browser-generated risk cookies
+returned a challenge, while the same current listing request through the same
+Evomi connection with a fresh cookie jar returned full property data. Five
+unique properties passed both the current site GET query and the existing POST
+query. The POST retained the photos expected by the existing response schema.
+A VM test then fetched 100/100 unique properties in 8.68 seconds through eight
+validated sessions, without application caches or imported browser cookies.
+
+The default pool now uses validated HTTP sessions and preserves cookies set by
+the server. Browser risk-cookie sessions are skipped when restoring this pool.
+Session age is enforced during runtime; malformed responses and 403s consume
+the retry budget. The optional legacy browser path uses isolated process
+workers, a hard deadline, and bounded cleanup. The API starts after the first
+validated session and fills the remaining slots in the background.
+
+
+Final deployed verification, with `cache_seconds: 0`:
+
+| Endpoint | Unique successful listings | Expected IDs matched | Route processing | Public client total |
+|---|---:|---|---:|---:|
+| Addresses | 1,000 / 1,000 | All | 15.80 s | 24.04 s |
+| URLs | 1,000 / 1,000 | All | 28.13 s | 37.79 s |
+
+Public totals include response receipt and JSON parsing. Both runs returned
+zero blocked rows and zero application cache hits. All 24 HTTP sessions remained
+validated. These observations do not establish a 10–20-second end-to-end SLA.
+The same 1,000 original inputs were retained: unit-marked addresses now try
+Zillow's `#` notation while still requiring an exact unit match. This resolved
+`Unit 1111N` without accepting nearby apartments.
+
+The final rollback backup is `/home/ubuntu/zillow-deploy-backups/http-sessions-20261011T083528Z`. Runtime hashes matched the deployed
+files, and 49 regression tests passed locally and on the VM. Secrets and
+runtime session data remain outside Git.

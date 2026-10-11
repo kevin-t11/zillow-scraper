@@ -9,9 +9,9 @@ Single entry point for the Zillow PX-Bypass server.
   python run.py --headed           # show the patched Chromium (debugging)
   python run.py --pool-size 12     # larger cookie pool
 
-Boots `px_bypass.serve:app` — which on lifespan-startup launches a single
-patched Chromium and mints `--pool-size` cookies in parallel via Evomi
-residential. Routes are defined in `px_bypass/routes.py`.
+Boots `px_bypass.serve:app`, which validates an Evomi HTTP session before
+serving and fills the remaining pool in the background. Routes are defined
+in `px_bypass/routes.py`.
 """
 
 from __future__ import annotations

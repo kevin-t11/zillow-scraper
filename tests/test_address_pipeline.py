@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 import unittest
 from dataclasses import asdict
 from pathlib import Path
@@ -242,6 +243,26 @@ class AddressPipelineTests(unittest.IsolatedAsyncioTestCase):
             result = await resolver.resolve_one(None, '123 Main St Unit 7, City, CA 90240')
         self.assertIsNone(result)
 
+    async def test_unit_notation_resolves_exact_unit_without_accepting_nearby_units(self):
+        queries = []
+        def respond(req):
+            query = req.url.params['q']; queries.append(query)
+            correct = '#1111N' in query
+            unit = '1111N' if correct else '1110N'
+            return httpx.Response(200, json={'results': [{
+                'display': f'3701 S George Mason Dr #{unit} Falls Church, VA 22041',
+                'metaData': {'zpid': 51853587 if correct else 51853586, 'unitNumber': unit},
+            }]})
+        from app.scraper import get_zpid_via_autocomplete
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            result = await get_zpid_via_autocomplete(
+                client, '3701 S George Mason Dr Unit 1111N, Falls Church, VA 22041',
+                prefer_full_address=True,
+            )
+        self.assertEqual(result[0], '51853587')
+        self.assertEqual(len(queries), 1)
+        self.assertIn('#1111N', queries[0])
+
     async def test_precise_autocomplete_is_first_and_fallback_remains(self):
         queries = []
         def respond(req):
@@ -349,7 +370,7 @@ class PoolSchedulingTests(unittest.IsolatedAsyncioTestCase):
         pool = CookiePool(mint, 2, evomi_cfg=EvomiConfig('example.test', 80, 'test', 'test'))
         pool._slots = [CookieSlot(
             idx=i, cookies={}, session_id=str(i), client=None,
-            sem=asyncio.Semaphore(1), minted_at=0,
+            sem=asyncio.Semaphore(1), minted_at=time.time(),
             validated=True,
         ) for i in range(2)]
         return pool

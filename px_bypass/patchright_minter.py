@@ -93,6 +93,11 @@ async def _press_and_hold(page: Page, frame_locator) -> bool:
 
 
 async def _solve_in_context(context: BrowserContext, timeout_s: float) -> dict:
+    async with asyncio.timeout(timeout_s):
+        return await _collect_cookies(context)
+
+
+async def _collect_cookies(context: BrowserContext) -> dict:
     page = await context.new_page()
     try:
         t0 = time.monotonic()
@@ -115,7 +120,7 @@ async def _solve_in_context(context: BrowserContext, timeout_s: float) -> dict:
                     time.monotonic() - t0, len(cookies), "_px3" in cookies)
         return cookies
     finally:
-        await page.close()
+        await asyncio.wait_for(page.close(), 3)
 
 
 class PatchrightMinter:
@@ -146,23 +151,26 @@ class PatchrightMinter:
     async def mint(self, *, session_id: str | None = None) -> dict:
         session_id = session_id or make_session_id()
         async with self._sem:
-            context = await self._browser.new_context(
-                proxy=_proxy_arg(session_id),
-                user_agent=UA,
-                locale="en-US",
-                timezone_id="America/Los_Angeles",
-                viewport={"width": 1280, "height": 900},
-            )
+            context = None
             try:
-                return await _solve_in_context(context, self._timeout_s)
+                async with asyncio.timeout(self._timeout_s):
+                    context = await self._browser.new_context(
+                        proxy=_proxy_arg(session_id),
+                        user_agent=UA,
+                        locale="en-US",
+                        timezone_id="America/Los_Angeles",
+                        viewport={"width": 1280, "height": 900},
+                    )
+                    return await _solve_in_context(context, self._timeout_s)
             finally:
-                await context.close()
+                if context is not None:
+                    await asyncio.wait_for(context.close(), 3)
 
     async def close(self) -> None:
         try:
-            await self._browser.close()
+            await asyncio.wait_for(self._browser.close(), 5)
         finally:
-            await self._pw.stop()
+            await asyncio.wait_for(self._pw.stop(), 5)
 
 
 async def mint_cookies(*, headless: bool = True, timeout_s: float = 60.0) -> dict:

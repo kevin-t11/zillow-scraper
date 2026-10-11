@@ -111,8 +111,8 @@ async def info() -> dict:
         "name": "Zillow PX Bypass",
         "version": "2.0",
         "description": (
-            "Scrapes Zillow listings by minting wide-scope PX cookies via "
-            "patchright + Evomi residential, then replaying them concurrently."
+            "Fetches public Zillow listing details through "
+            "validated Evomi HTTP sessions with bounded retries."
         ),
         "endpoints": [
             {
