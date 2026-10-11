@@ -391,3 +391,41 @@ Every run below fetched the same 1,000 distinct URLs with `cache_seconds: 0`; al
 The 32-session run required session refreshes. The recommended observed VM configuration is **24 sessions × 10 requests per session**, with request concurrency **240**. The 24-session optimized run compressed a 33,098,669-byte JSON body to 5,597,557 bytes. Merely increasing concurrency did not improve VM fetch processing in these trials. Performance depends on session health and network conditions; these are individual measurements, not a guarantee.
 
 The optimized code was subsequently deployed on 2026-10-08 with the existing search endpoint preserved. Post-deployment tests returned all 1,000 expected distinct properties fresh through each scrape endpoint: addresses took 19.89s and URLs took 34.33s, including response receipt and parsing on the VM. External transfer and startup are excluded; the URL run included session refreshes. See [DEPLOYMENT.md](DEPLOYMENT.md) for the deployed profile and verification. Earlier comparison data remains in the ignored local `output/` directory.
+
+
+### HTTPS proxy connection optimization (2026-10-11)
+
+The session pool reuses one verified TLS context for its HTTPS proxy connections.
+Previously, every new proxy connection loaded the system and certifi certificate
+stores synchronously on the event loop. A 300-listing VM profile attributed
+14.33 seconds to these repeated certificate-store loads. The shared context
+retains hostname and certificate verification; each sticky session still has
+its own HTTP client, connections, and cookie jar.
+
+No request changes are needed. Use the URL endpoint when you already have
+listing URLs, retain its default `concurrency: 240`, send `cache_seconds: 0`
+for fresh retrieval, and accept gzip responses. URL requests skip address
+resolution. Both endpoints benefit from the connection fix.
+
+Live verification after deployment:
+
+| Endpoint/run | Distinct successful listings | Route processing | Public client total |
+|---|---:|---:|---:|
+| Urls (1) | 1,000 / 1,000 | 13.47 s | 18.90 s |
+| Addresses (2) | 1,000 / 1,000 | 14.47 s | 20.71 s |
+| Urls (3) | 1,000 / 1,000 | 13.06 s | 20.42 s |
+
+All runs used `cache_seconds: 0`, matched every expected property ID, and
+completed each listing in one attempt with zero blocks. The same 1,000 unique
+properties were used across endpoints; both caches stayed empty. All 24
+sessions remained healthy. Public totals include complete response delivery
+and JSON parsing, and exclude startup. Responses retained all existing fields,
+including photos and price/tax histories. These are measured runs, not a latency
+guarantee; the repeat URL call took 20.42 seconds including internet transfer.
+
+Before this fix, the same URL test at concurrency 240 took 28.78 seconds in
+the route and 33.79 seconds end to end. Reducing concurrency alone to 120 took
+19.71 seconds in the route and 23.95 seconds end to end. The connection fix
+keeps the URL default at 240 and reduces the measured route time to about
+13 seconds. Address resolution already overlaps with listing retrieval, so
+skipping it does not remove its full duration from total latency.

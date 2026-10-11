@@ -11,11 +11,13 @@ from contextlib import asynccontextmanager
 import json
 import logging
 import os
+import ssl
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
+import certifi
 import httpx
 
 from .proxy import EvomiConfig, build_proxy_url, make_session_id
@@ -102,6 +104,7 @@ class CookiePool:
         self._recovery_active = False
         self._last_recovery_started_at: float | None = None
         self._last_recovery_completed_at: float | None = None
+        self._proxy_ssl_context: ssl.SSLContext | None = None
 
     @classmethod
     async def create(
@@ -272,12 +275,19 @@ class CookiePool:
         proxy_url = build_proxy_url(
             self._evomi, session=session_id, country="US", lifetime_min=30,
         )
+        if self._evomi.scheme == "https" and self._proxy_ssl_context is None:
+            # Match httpcore's verified proxy TLS defaults, but load the trust
+            # store once. Its implicit default rebuilds this synchronously for
+            # every new proxy connection, stalling bulk fetches on the event loop.
+            self._proxy_ssl_context = ssl.create_default_context()
+            self._proxy_ssl_context.load_verify_locations(certifi.where())
+        proxy = httpx.Proxy(proxy_url, ssl_context=self._proxy_ssl_context)
         limits = httpx.Limits(
             max_connections=self._per_slot_c * 2,
             max_keepalive_connections=self._per_slot_c,
         )
         return httpx.AsyncClient(
-            http2=True, follow_redirects=True, proxy=proxy_url, limits=limits,
+            http2=True, follow_redirects=True, proxy=proxy, limits=limits,
         )
 
     async def _mint(self, idx: int) -> CookieSlot:

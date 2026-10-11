@@ -129,3 +129,31 @@ Zillow's `#` notation while still requiring an exact unit match. This resolved
 The final rollback backup is `/home/ubuntu/zillow-deploy-backups/http-sessions-20261011T083528Z`. Runtime hashes matched the deployed
 files, and 49 regression tests passed locally and on the VM. Secrets and
 runtime session data remain outside Git.
+
+
+## HTTPS proxy TLS performance correction on October 11
+
+The pool now shares the verified HTTPS proxy TLS configuration between its
+clients. This avoids repeatedly loading certificate stores while opening
+connections. Sticky proxy sessions and cookies remain separate, and both
+proxy and origin certificate verification remain enabled. Request schemas,
+listing fields, cache behavior, and concurrency defaults are unchanged.
+
+| Endpoint/run | Distinct successful listings | Route processing | Public client total |
+|---|---:|---:|---:|
+| Urls (1) | 1,000 / 1,000 | 13.47 s | 18.90 s |
+| Addresses (2) | 1,000 / 1,000 | 14.47 s | 20.71 s |
+| Urls (3) | 1,000 / 1,000 | 13.06 s | 20.42 s |
+
+All runs used `cache_seconds: 0`, matched every expected property ID, and
+completed each listing in one attempt with zero blocks. The same 1,000 unique
+properties were used across endpoints; both caches stayed empty. All 24
+sessions remained healthy. Public totals include complete response delivery
+and JSON parsing, and exclude startup. Responses retained all existing fields,
+including photos and price/tax histories. These are measured runs, not a latency
+guarantee; the repeat URL call took 20.42 seconds including internet transfer.
+
+All 50 regression tests passed locally and in the staged VM checkout. All 24
+runtime manifest hashes matched the deployed files. The rollback backup is
+`/home/ubuntu/zillow-deploy-backups/url-tls-speed-20261011T091111Z`. Benchmark details and
+calling guidance are in [API.md](API.md#https-proxy-connection-optimization-2026-10-11).

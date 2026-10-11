@@ -1,4 +1,5 @@
 httpx[http2]>=0.27.0
+certifi>=2024.2.2
 python-dotenv>=1.0.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0

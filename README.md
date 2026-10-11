@@ -252,3 +252,10 @@ listings in 34.33s, with all expected property IDs matched. These complete-respo
 times were measured on the VM and exclude external internet transfer and startup;
 the URL run included session refreshes. Earlier preview measurements are retained
 in [API.md](API.md#lightsail-comparison-2026-10-08). These are observed runs, not latency guarantees.
+
+The October 11 HTTPS proxy connection fix reduced 1,000 uncached URL listings
+from 33.79 seconds to 18.90–20.42 seconds in public client tests. The address
+comparison took 20.71 seconds; every run returned all 1,000 expected unique
+properties. These times include full response transfer and JSON parsing.
+Use the URL endpoint's default concurrency of 240 and accept gzip. See the
+[latest benchmark and calling guidance](API.md#https-proxy-connection-optimization-2026-10-11).
