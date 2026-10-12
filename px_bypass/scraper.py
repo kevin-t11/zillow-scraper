@@ -1,14 +1,7 @@
-"""
-Concurrent ForSaleNonPriorityQuery fetches via httpx.
+"""Fetch full property data with Zillow's published persisted GET query.
 
-Strategy:
-  1. Try direct (no proxy) first — saves 100% bandwidth cost when our IP
-     isn't rate-limited yet.
-  2. On 403 / connection error, retry through Evomi residential.
-  3. After 3 consecutive proxy failures too, halt with "cookies expired".
-
-Cookies come from the cookie store (JSON file written by the refresher
-daemon) on the VM, or from Brave's keychain on a laptop dev box.
+Both API scrape routes use validated Evomi HTTP sessions. Every upstream
+attempt is bounded, and property identity is checked before returning success.
 """
 
 from __future__ import annotations
@@ -33,13 +26,13 @@ from .proxy import resolve_proxy_url
 
 logger = logging.getLogger("px_bypass.scraper")
 
-QUERY_TEMPLATE_PATH = Path(__file__).parent / "queries" / "for_sale_non_priority.json"
+QUERY_TEMPLATE_PATH = Path(__file__).parent / "queries" / "property_details.json"
 
 HEADERS = {
     "accept": "*/*",
     "accept-language": "en-US,en;q=0.9",
     "content-type": "application/json",
-    "client-id": "for-sale-sub-app-browser-client",
+    "client-id": "not-for-sale-sub-app-browser-client",
     "origin": "https://www.zillow.com",
     "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
@@ -49,7 +42,6 @@ HEADERS = {
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-origin",
-    "x-enabled-listings-flag": "restricted",
     "x-z-enable-oauth-conversion": "true",
 }
 
@@ -112,21 +104,11 @@ class _State:
 
 
 def _build_request(zpid: str, slug: str, query_template: dict) -> tuple[str, dict, dict]:
-    url = (
-        f"https://www.zillow.com/graphql/?zpid={zpid}"
-        "&platform=DESKTOP_WEB&formType=OPAQUE"
-        "&contactFormRenderParameter=&skipCFRD=false"
-        "&submitFlowRequestSource=&ompDeviceType=WEB_DESKTOP"
-        "&operationName=ForSaleNonPriorityQuery"
-    )
-    # Only these two variable fields change; the safelisted query stays exact.
+    url = "https://www.zillow.com/graphql/"
+    # Keep the published query identifier fixed; only property identity varies.
     body = dict(query_template)
     body["variables"] = dict(query_template["variables"])
-    body["variables"]["contactFormRenderParameter"] = dict(
-        query_template["variables"]["contactFormRenderParameter"]
-    )
     body["variables"]["zpid"] = int(zpid)
-    body["variables"]["contactFormRenderParameter"]["zpid"] = int(zpid)
     headers = dict(HEADERS)
     headers["referer"] = f"https://www.zillow.com/homedetails/{slug}/{zpid}_zpid/"
     return url, body, headers
@@ -134,10 +116,13 @@ def _build_request(zpid: str, slug: str, query_template: dict) -> tuple[str, dic
 
 async def _attempt(
     client: httpx.AsyncClient, url: str, body: dict, headers: dict, cookies: dict,
+    *, timeout: float = 30,
 ) -> tuple[int, bytes]:
-    """Single POST. Returns (status, body_bytes)."""
-    r = await client.post(url, json=body, headers=headers, timeout=30,
-                          **({"cookies": cookies} if cookies else {}))
+    """One persisted-query GET, shared by validation and property fetches."""
+    params = {key: json.dumps(body[key], separators=(",", ":"))
+              for key in ("variables", "extensions")}
+    r = await client.get(url, params=params, headers=headers, timeout=timeout,
+                         **({"cookies": cookies} if cookies else {}))
     return r.status_code, r.content
 
 

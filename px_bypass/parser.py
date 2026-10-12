@@ -1,5 +1,5 @@
 """
-Map a Zillow ForSaleNonPriorityQuery response into PropertyListing.
+Map a Zillow data.property response into PropertyListing.
 
 Field paths were derived from a real 200-response captured in the HAR.
 This parser is intentionally tolerant — every field falls back to a sane

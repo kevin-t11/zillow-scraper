@@ -1,6 +1,6 @@
 # Zillow Scraper API Reference
 
-Reference for the v2 HTTP API started by `python run.py`. Discover listings by market, or send Zillow listing URLs or street addresses and receive property data with a batch summary. The runtime implementation in this repository matches the deployed Lightsail code as verified on 2026-10-08.
+Reference for the v2 HTTP API started by `python run.py`. Discover listings by market, or send Zillow listing URLs or street addresses and receive property data with a batch summary. The runtime implementation in this repository matches the deployed Lightsail code as verified on 2026-10-12.
 
 ## Connection and interactive docs
 
@@ -20,6 +20,11 @@ python run.py
 ```
 
 The server validates an Evomi HTTP session before accepting requests and fills the rest of the pool in the background. The current default pool size is 24, with 5 concurrent requests per slot. Startup time varies. Browser-generated risk cookies are not imported by the default HTTP path.
+
+Address and URL scraping use a single persisted property GET request upstream
+for each unique uncached property. The response includes photos, description,
+facts, and price/tax history when available from Zillow. Request parameters and
+response fields for API callers are unchanged.
 
 The application defines no API key or authentication header. A deployment may add authentication through its reverse proxy. POST requests use `Content-Type: application/json`. Clients advertising `Accept-Encoding: gzip` receive compressed responses larger than 1 KiB; clients requesting `identity` receive plain JSON. Compression preserves all result fields. Both scrape endpoints wait for completion and return JSON; they do not stream or return a job ID.
 

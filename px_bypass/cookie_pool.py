@@ -168,15 +168,14 @@ class CookiePool:
 
     async def _validate_slot(self, slot: CookieSlot) -> None:
         # Import lazily: scraper imports CookiePool for its worker interface.
-        from .scraper import QUERY_TEMPLATE_PATH, _build_request
+        from .scraper import QUERY_TEMPLATE_PATH, _attempt, _build_request
         zpid = "51816594"  # the same property used to establish the browser session
         url, body, headers = _build_request(zpid, "6910-Farragut-Ave-Falls-Church-VA-22042", json.loads(QUERY_TEMPLATE_PATH.read_text()))
-        response = await slot.client.post(url, json=body, headers=headers, timeout=15,
-                                          **({"cookies": slot.cookies} if slot.cookies else {}))
-        if response.status_code != 200:
-            raise SessionValidationError(f"Validation listing returned HTTP {response.status_code}")
+        status, content = await _attempt(slot.client, url, body, headers, slot.cookies, timeout=15)
+        if status != 200:
+            raise SessionValidationError(f"Validation listing returned HTTP {status}")
         try:
-            prop = (response.json().get("data") or {}).get("property") or {}
+            prop = (json.loads(content).get("data") or {}).get("property") or {}
         except (ValueError, AttributeError, TypeError):
             prop = {}
         if not isinstance(prop, dict) or str(prop.get("zpid")) != zpid:

@@ -1,0 +1,15 @@
+{
+  "operationName": "NotForSaleBotsQuery",
+  "variables": {
+    "zpid": 51816594,
+    "altId": null,
+    "deviceTypeV2": "WEB_DESKTOP",
+    "includeLastSoldListing": true
+  },
+  "extensions": {
+    "persistedQuery": {
+      "version": 1,
+      "sha256Hash": "8a0948d209323316b73b674969f73bf942ab5cb950f1d37a61ef263a41ff06fc"
+    }
+  }
+}

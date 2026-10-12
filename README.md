@@ -26,7 +26,7 @@ addresses → autocomplete → listing URLs
                                ↓
               validated Evomi HTTP session pool
                                ↓
-                ForSaleNonPriorityQuery → full listing data
+                persisted property GET query → full listing data
 ```
 
 The pool validates each session against a known property, limits concurrent
@@ -39,6 +39,13 @@ The legacy browser session path remains available to Python callers with
 `prefer_http_sessions=False`. Browser workers have hard process deadlines so a
 frozen renderer cannot stall recovery. Browsers are unnecessary for the default
 HTTP session path.
+
+Both detail routes use Zillow's published `NotForSaleBotsQuery` persisted GET
+request, which includes photos, description, facts, and price/tax history in one
+response. It also returns active sale properties. The previous full-query POST
+was challenged with HTTP 403 while this GET returned the requested property.
+The query identifier is in `px_bypass/queries/property_details.json`; see
+[query maintenance](px_bypass/queries/README.md) when Zillow changes its bundle.
 
 ## Setup
 

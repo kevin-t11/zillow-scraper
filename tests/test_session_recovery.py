@@ -61,6 +61,48 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.pool.stats['live'], 1)
         self.assertIs(await self.pool.acquire(), slot)
 
+    async def test_validation_and_scraping_use_same_persisted_get_and_keep_details(self):
+        requests = []
+        prop = {
+            'zpid': 51816594, 'price': 875000, 'yearBuilt': 1943,
+            'address': {'streetAddress': '6910 Farragut Ave', 'city': 'Falls Church',
+                        'state': 'VA', 'zipcode': '22042'},
+            'description': 'Listing description',
+            'originalPhotos': [{'mixedSources': {'jpeg': [
+                {'width': 100, 'url': 'https://example.com/small.jpg'},
+                {'width': 1200, 'url': 'https://example.com/large.jpg'}]}}],
+            'priceHistory': [{'date': '2026-05-14', 'event': 'Sold', 'price': 875000}],
+            'taxHistory': [{'time': 1735689600000, 'taxPaid': 10119}],
+        }
+        def respond(request):
+            requests.append(request)
+            self.assertEqual(request.method, 'GET')
+            self.assertEqual(request.url.path, '/graphql/')
+            self.assertFalse(request.content)
+            variables = json.loads(request.url.params['variables'])
+            self.assertEqual(variables['zpid'], 51816594)
+            self.assertTrue(variables['includeLastSoldListing'])
+            self.assertEqual(request.headers['client-id'], 'not-for-sale-sub-app-browser-client')
+            self.assertNotIn('query', request.url.params)
+            persisted = json.loads(request.url.params['extensions'])['persistedQuery']
+            self.assertEqual(persisted['version'], 1)
+            self.assertEqual(len(persisted['sha256Hash']), 64)
+            return httpx.Response(200, json={'data': {'property': prop}})
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        with patch.object(self.pool, '_build_client', return_value=client):
+            await self.pool._mint(0)
+        url = 'https://www.zillow.com/homedetails/51816594_zpid/'
+        rows, stats = await scraper.scrape_urls_via_px([url], pool=self.pool, skip_direct=True)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(stats.success, 1)
+        row = rows[0]
+        self.assertEqual(row.zpid, '51816594')
+        self.assertEqual(row.description, 'Listing description')
+        self.assertEqual(row.photos, ['https://example.com/large.jpg'])
+        self.assertEqual(row.price_history[0]['price'], 875000)
+        self.assertEqual(row.tax_history[0]['tax_paid'], 10119)
+        self.assertEqual(row.year_built, 1943)
+
     async def test_malformed_or_wrong_property_cannot_become_live(self):
         for payload in [[], {'data': []}, {'data': {'property': 'bad'}},
                         {'data': {'property': {'zpid': 1}}}]:

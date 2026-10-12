@@ -406,7 +406,7 @@ class PoolSchedulingTests(unittest.IsolatedAsyncioTestCase):
     async def test_actual_fetch_uses_and_releases_pool_lease(self):
         pool = self.make_pool()
         def respond(req):
-            zpid = str(json.loads(req.content)['variables']['zpid'])
+            zpid = str(json.loads(req.url.params['variables'])['zpid'])
             return httpx.Response(200, json={'data': {'property': {'zpid': zpid}}})
         clients = [httpx.AsyncClient(transport=httpx.MockTransport(respond)) for _ in range(2)]
         for slot, client in zip(pool._slots, clients):
@@ -441,9 +441,9 @@ class SerializationTests(unittest.TestCase):
         self.assertEqual(template, original)
         self.assertEqual(a['variables']['zpid'], 1)
         self.assertEqual(b['variables']['zpid'], 2)
-        self.assertEqual(a['variables']['contactFormRenderParameter']['zpid'], 1)
-        self.assertEqual(b['variables']['contactFormRenderParameter']['zpid'], 2)
-        self.assertEqual(a['query'], original['query'])
+        self.assertEqual(a['extensions'], original['extensions'])
+        self.assertEqual(b['extensions'], original['extensions'])
+        self.assertNotIn('query', a)
 
 
 if __name__ == '__main__':
