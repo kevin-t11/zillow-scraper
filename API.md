@@ -29,7 +29,7 @@ The application defines no API key or authentication header. A deployment may ad
 |---|---|---|
 | GET | `/health` | Cookie pool status and counters |
 | GET | `/info` | Service metadata, route catalog, and request schemas |
-| POST | `/v2/search/listings` | Discover listings by market and optionally fetch details |
+| POST | `/v2/search/listings` | Discover fresh listing previews by area and filters |
 | POST | `/v2/scrape/urls` | Scrape listing URLs |
 | POST | `/v2/scrape/addresses` | Resolve addresses and scrape their listings |
 
@@ -38,6 +38,9 @@ The legacy routes in `app/server.py`, such as `/scrape` and `/scrape/urls`, are 
 ## Discover listings by market
 
 `POST /v2/search/listings`
+
+This endpoint always returns fresh search-card previews. It does not fetch
+property details or read/write the property cache.
 
 Choose exactly one area mode:
 
@@ -70,14 +73,11 @@ custom polygons and antimeridian-crossing boxes are not accepted.
 | `year_built_min`, `year_built_max` | None | Inclusive integer bounds, 1000–9999; either may be omitted; min ≤ max |
 | `sold_in_last` | None | Sold searches only: `"any"`, `"1"`, `"7"`, `"14"`, `"30"`, `"90"`, `"6m"`, `"12m"`, `"24m"`, `"36m"`. Numeric strings mean days; `m` means months. |
 | `max_results` | 500 | 1–2,000 unique matching properties; a cap, not a guaranteed count |
-| `include_details` | true | false returns search-card previews without fetching each property |
 | `tile_if_needed` | true | Split only truncated areas; paginate dense leaf areas |
 | `tile_depth` | 2 | 0–3 |
 | `max_search_requests` | 25 | 1–100 search pages/tiles per request, excluding retries and session validation |
 | `search_concurrency` | 4 | 1–16 simultaneous page/tile requests |
-| `concurrency` | 60 | 1–300; property-detail retrieval |
-| `max_retries` | 3 | 1–10 attempts per upstream search/detail request |
-| `cache_seconds` | 86400 | 0–86400; property details only. Discovery is always fresh. |
+| `max_retries` | 3 | 1–10 attempts per upstream search request |
 | `include_fsbo`, `include_new_construction`, `include_coming_soon` | true | For-sale inclusion flags; including new construction does not make it exclusive |
 | `include_foreclosures`, `include_auctions` | false | For-sale inclusion flags |
 
@@ -100,8 +100,7 @@ curl --compressed --max-time 180 \
     "new_construction_only": true,
     "year_built_min": 2020,
     "year_built_max": 2026,
-    "max_results": 100,
-    "include_details": false
+    "max_results": 100
   }'
 ```
 
@@ -117,8 +116,7 @@ curl --compressed --max-time 180 \
     "sold_in_last": "12m",
     "home_types": ["single_family"],
     "year_built_min": 2000,
-    "max_results": 100,
-    "include_details": false
+    "max_results": 100
   }'
 ```
 
@@ -133,19 +131,21 @@ or repeated page prevented complete enumeration. `limit_reached: true` means
 the requested result cap was met. Neither promises that every property in a
 large area has been enumerated.
 
-Preview mode is fastest: it avoids one detail fetch per property. Detail mode
-merges property data and attaches `search_preview`; fresh search coordinates
-and listing status take precedence over cached details. A card without a detail
-result can have `status: "search_only"`. Use `cache_seconds: 0` when full details
-must also be freshly fetched. Smaller areas and narrower upstream filters can
-reduce work; the address/URL benchmarks do not establish search latency.
+Results include the Zillow URL/ZPID, address, price, beds/baths, area, home
+and listing type, coordinates, preview image, and any description available on
+the search card. Fields can be empty or null when Zillow omits them. There is
+no detail mode, full photo gallery, or per-property detail request.
+
+**Client migration:** omit `include_details`, `concurrency`, and `cache_seconds`
+from listings requests. These removed fields now return HTTP 422 (including
+`include_details: false`). Use `search_concurrency` to control discovery work.
+Address and URL scrape endpoints retain their own detail and cache behavior.
 
 Discovery uses its own validated Evomi session pool (`SEARCH_POOL_SIZE`, default
-4). Preview searches can work while property-detail requests are blocked.
-`/health` reports both pools and returns HTTP 503 with `status: "search-only"`
-when only discovery is available. Full-detail requests that need uncached
-properties return HTTP 503 when detail sessions are unavailable. No live search
-sessions also produces HTTP 503; upstream search/location errors produce HTTP 502.
+4), independently of property-detail sessions. `/health` reports both pools and
+returns HTTP 503 with `status: "search-only"` when only discovery is available;
+the listings endpoint still works in that state. No live search sessions
+produces HTTP 503; upstream search/location errors produce HTTP 502.
 
 ## Scrape by URL
 

@@ -211,7 +211,7 @@ class SearchRouteTests(unittest.IsolatedAsyncioTestCase):
         self.detail_pool.stats['live'] = 0
         with patch.object(search, '_fetch_search_payload', AsyncMock(return_value=(upstream([card(1)]), 1))), \
              patch.object(routes, 'scrape_urls_via_px', side_effect=AssertionError('detail fetch')):
-            response = await self.client.post('/v2/search/listings', json={'bbox': BOUNDS, 'include_details': False})
+            response = await self.client.post('/v2/search/listings', json={'bbox': BOUNDS})
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body['summary']['area']['mode'], 'bbox')
@@ -221,45 +221,42 @@ class SearchRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(health.status_code, 503)
         self.assertEqual(health.json()['status'], 'search-only')
 
-    async def test_full_details_require_detail_sessions_and_errors_are_honest(self):
-        self.detail_pool.stats['live'] = 0
-        with patch.object(search, '_fetch_search_payload', AsyncMock(return_value=(upstream([card(1)]), 1))):
-            response = await self.client.post('/v2/search/listings', json={'bbox': BOUNDS})
-        self.assertEqual(response.status_code, 503)
-
-    async def test_cached_details_keep_fresh_search_coordinates(self):
-        routes._listing_cache.set('1', PropertyListing(zpid='1', status='success', latitude=50, longitude=-70), 60)
-        self.detail_pool.stats['live'] = 0
-        with patch.object(search, '_fetch_search_payload', AsyncMock(return_value=(upstream([card(1)]), 1))):
+    async def test_default_search_ignores_detail_cache_and_needs_no_detail_pool(self):
+        del self.app.state.pool
+        routes._listing_cache.set('1', PropertyListing(zpid='1', price=999, status='success', latitude=50), 60)
+        with patch.object(search, '_fetch_search_payload', AsyncMock(return_value=(upstream([card(1, price='$123')]), 1))), \
+             patch.object(routes, 'scrape_urls_via_px', side_effect=AssertionError('detail fetch')), \
+             patch.object(routes._listing_cache, 'get', side_effect=AssertionError('detail cache read')), \
+             patch.object(routes._listing_cache, 'set', side_effect=AssertionError('detail cache write')):
             response = await self.client.post('/v2/search/listings', json={'bbox': BOUNDS})
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()['results'][0]['latitude'], 41.75)
-        self.assertEqual(response.json()['summary']['cached'], 1)
-        self.assertEqual(routes._listing_cache.get('1').latitude, 50)
+        result = response.json()['results'][0]
+        self.assertEqual(result['price'], 123)
+        self.assertEqual(result['latitude'], 41.75)
+        self.assertNotIn('photos', result)
+        self.assertNotIn('search_preview', result)
+        self.assertNotIn('pool', response.json()['summary'])
+        self.assertNotIn('include_details', response.json()['summary'])
+        self.assertEqual(routes._listing_cache.get('1').price, 999)
 
-    async def test_uncached_detail_flow_uses_detail_pool_and_does_not_cache(self):
-        routes._listing_cache.set('1', PropertyListing(zpid='1', status='success', price=1), 60)
-        details = [PropertyListing(zpid='1', status='success', price=2)]
-        stats = SimpleNamespace(blocked=0, not_found=0, other_error=0, elapsed_s=1, rate=1)
-        with patch.object(search, '_fetch_search_payload', AsyncMock(return_value=(upstream([card(1), card(1)]), 1))), \
-             patch.object(routes, 'scrape_urls_via_px', AsyncMock(return_value=(details, stats))) as fetch:
-            response = await self.client.post('/v2/search/listings', json={'bbox': BOUNDS, 'cache_seconds': 0})
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()['results'][0]['price'], 2)
-        self.assertEqual(response.json()['summary']['cached'], 0)
-        self.assertIs(fetch.call_args.kwargs['pool'], self.detail_pool)
-        self.assertEqual(len(fetch.call_args.args[0]), 1)
-        self.assertEqual(routes._listing_cache.get('1').price, 1)
+    async def test_removed_detail_options_return_422_before_network(self):
+        for key, value in (('include_details', True), ('include_details', False),
+                           ('cache_seconds', 0), ('concurrency', 60)):
+            with self.subTest(key=key, value=value), \
+                 patch.object(search, '_fetch_search_payload', side_effect=AssertionError('network')):
+                response = await self.client.post('/v2/search/listings', json={'bbox': BOUNDS, key: value})
+            self.assertEqual(response.status_code, 422)
 
     async def test_upstream_failure_is_502(self):
         with patch.object(search, '_fetch_search_payload', side_effect=search.SearchError('Zillow search returned HTTP 403')):
-            response = await self.client.post('/v2/search/listings', json={'bbox': BOUNDS, 'include_details': False})
+            response = await self.client.post('/v2/search/listings', json={'bbox': BOUNDS})
         self.assertEqual(response.status_code, 502)
 
     async def test_openapi_exposes_both_modes_and_disallows_unknown_fields(self):
         response = await self.client.get('/openapi.json')
         schema = response.json()['components']['schemas']['SearchListingsRequest']
         self.assertFalse(schema['additionalProperties'])
+        self.assertTrue({'include_details', 'concurrency', 'cache_seconds'}.isdisjoint(schema['properties']))
         self.assertTrue({'bbox', 'location', 'new_construction_only', 'sold_in_last', 'year_built_min', 'year_built_max'} <= schema['properties'].keys())
 
 

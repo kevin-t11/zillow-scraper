@@ -1,7 +1,7 @@
 """Zillow search/discovery helpers for batch listing collection.
 
-This module discovers listing URLs from Zillow search/map results, then the
-route layer can pass those URLs into the existing detail scraper.
+This module collects fresh listing previews from Zillow search/map results.
+Discovery is independent of the property-detail scraper and its cache.
 """
 
 from __future__ import annotations

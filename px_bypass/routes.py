@@ -16,7 +16,7 @@ from app.models import PropertyListing
 from .cache import TTLCache, normalize_address
 from .resolver import iter_resolved_addresses
 from .scraper import parse_listing_url, scrape_urls_via_px
-from .search import SearchError, SearchListingPreview, discover_zillow_listings
+from .search import SearchError, discover_zillow_listings
 
 if TYPE_CHECKING:
     from .cookie_pool import CookiePool
@@ -85,15 +85,12 @@ class SearchListingsRequest(BaseModel):
     status: ZillowSearchStatus = "for_sale"
     home_types: list[ZillowHomeType] = Field(default_factory=lambda: ["multi_family"], min_length=1)
     max_results: int = Field(500, ge=1, le=2000)
-    include_details: bool = True
     radius_miles: float = Field(12.0, ge=0.25, le=100, strict=True)
     tile_if_needed: bool = True
     tile_depth: int = Field(2, ge=0, le=3)
     search_concurrency: int = Field(4, ge=1, le=16)
     max_search_requests: int = Field(25, ge=1, le=100)
-    concurrency: int = Field(60, ge=1, le=300)
     max_retries: int = Field(3, ge=1, le=10)
-    cache_seconds: int = Field(86400, ge=0, le=86400)
     include_fsbo: bool = True
     include_new_construction: bool = True
     include_coming_soon: bool = True
@@ -212,7 +209,7 @@ async def info() -> dict:
                 "path": "/v2/search/listings",
                 "summary": (
                     "Discover listings inside a location/radius or bbox, with construction, "
-                    "year-built and sold-date filters. Optionally fetch property details."
+                    "year-built and sold-date filters. Returns fresh search-card previews."
                 ),
                 "request": SearchListingsRequest.model_json_schema(),
                 "example": {
@@ -220,14 +217,12 @@ async def info() -> dict:
                     "status": "for_sale",
                     "home_types": ["multi_family"],
                     "max_results": 500,
-                    "include_details": True,
                     "radius_miles": 12,
                 },
                 "bbox_example": {
                     "bbox": {"north": 41.84, "south": 41.66, "east": -88.05, "west": -88.25},
                     "status": "sold", "sold_in_last": "12m",
                     "home_types": ["single_family"], "year_built_min": 2000,
-                    "include_details": False,
                 },
             },
             {
@@ -482,44 +477,6 @@ async def scrape_addresses_v2(
     )
 
 
-def _merge_preview_into_detail(detail: PropertyListing, preview: SearchListingPreview) -> dict:
-    data = detail.to_dict()
-    preview_data = preview.to_dict()
-    for key in (
-        "zpid",
-        "url",
-        "full_address",
-        "street",
-        "city",
-        "state",
-        "zipcode",
-        "price",
-        "price_str",
-        "bedrooms",
-        "bathrooms",
-        "living_area_sqft",
-        "lot_size_sqft",
-        "home_type",
-        "listing_status",
-        "days_on_zillow",
-        "latitude",
-        "longitude",
-        "description",
-    ):
-        if not data.get(key) and preview_data.get(key):
-            data[key] = preview_data[key]
-    if not data.get("photos") and preview.image:
-        data["photos"] = [preview.image]
-        data["photo_count"] = max(data.get("photo_count") or 0, 1)
-    data["search_preview"] = preview_data
-    # Search membership and map coordinates come from this fresh discovery,
-    # even when detail data came from the shared property cache.
-    for key in ("latitude", "longitude", "listing_status"):
-        if preview_data[key] not in (None, ""):
-            data[key] = preview_data[key]
-    return data
-
-
 @router.post("/v2/search/listings", response_model=ScrapeResponse)
 async def search_listings_v2(req: SearchListingsRequest, request: Request) -> ScrapeResponse:
     t_total = time.monotonic()
@@ -576,69 +533,8 @@ async def search_listings_v2(req: SearchListingsRequest, request: Request) -> Sc
         applied_filters["include_new_construction"] = False
         applied_filters["include_coming_soon"] = False
 
-    if not req.include_details:
-        return ScrapeResponse(
-            results=[p.to_dict() for p in previews],
-            summary={
-                "location": location.display if location else None,
-                "area": search_stats.area,
-                "applied_filters": applied_filters,
-                "status": req.status,
-                "home_types": list(req.home_types),
-                "discovered": len(previews),
-                "scraped": 0,
-                "success": len(previews),
-                "with_images": sum(1 for p in previews if p.image),
-                "include_details": False,
-                "search": search_summary,
-                "elapsed_s": round(time.monotonic() - t_total, 2),
-                "pool": _pool_stats_or_empty(request),
-                "search_pool": pool.stats,
-            },
-        )
-
-    cached_by_zpid: dict[str, PropertyListing] = {}
-    misses: list[str] = []
-    for preview in previews:
-        hit = _listing_cache.get(preview.zpid) if req.cache_seconds > 0 else None
-        if hit is not None:
-            cached_by_zpid[preview.zpid] = hit
-        elif preview.url:
-            misses.append(preview.url)
-
-    stats = None
-    fresh: list[PropertyListing] = []
-    if misses:
-        detail_pool = _pool(request)
-        fresh, stats = await scrape_urls_via_px(
-            misses,
-            concurrency=req.concurrency,
-            max_retries=req.max_retries,
-            skip_direct=True,
-            pool=detail_pool,
-        )
-        for result in fresh:
-            if result.zpid:
-                cached_by_zpid[result.zpid] = result
-            if result.status == "success" and result.zpid:
-                _listing_cache.set(result.zpid, result, req.cache_seconds)
-
-    results: list[dict] = []
-    for preview in previews:
-        detail = cached_by_zpid.get(preview.zpid)
-        if detail is not None:
-            results.append(_merge_preview_into_detail(detail, preview))
-        else:
-            preview_data = preview.to_dict()
-            preview_data["status"] = "search_only"
-            preview_data["search_preview"] = preview.to_dict()
-            if preview.image:
-                preview_data["photos"] = [preview.image]
-                preview_data["photo_count"] = 1
-            results.append(preview_data)
-
     return ScrapeResponse(
-        results=results,
+        results=[p.to_dict() for p in previews],
         summary={
             "location": location.display if location else None,
             "area": search_stats.area,
@@ -646,20 +542,10 @@ async def search_listings_v2(req: SearchListingsRequest, request: Request) -> Sc
             "status": req.status,
             "home_types": list(req.home_types),
             "discovered": len(previews),
-            "scraped": len(fresh),
-            "cached": len(previews) - len(misses),
-            "success": sum(1 for r in results if r.get("status") == "success"),
-            "blocked": stats.blocked if stats else 0,
-            "not_found": stats.not_found if stats else 0,
-            "other_error": stats.other_error if stats else 0,
-            "with_images": sum(1 for r in results if r.get("photos")),
-            "with_description": sum(1 for r in results if r.get("description")),
-            "include_details": True,
+            "success": len(previews),
+            "with_images": sum(1 for p in previews if p.image),
             "search": search_summary,
-            "scrape_elapsed_s": round(stats.elapsed_s, 2) if stats else 0.0,
-            "rate_per_sec": round(stats.rate, 2) if stats else 0.0,
             "elapsed_s": round(time.monotonic() - t_total, 2),
-            "pool": _pool_stats_or_empty(request),
             "search_pool": pool.stats,
         },
     )

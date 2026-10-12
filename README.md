@@ -95,7 +95,7 @@ at `http://localhost:8000/docs` after the server starts.
 
 | Endpoint | Input | Notes |
 |---|---|---|
-| `POST /v2/search/listings` | Market and filters | Discover listings and optionally fetch full details |
+| `POST /v2/search/listings` | Location/radius or bbox and filters | Return fresh listing previews |
 | `POST /v2/scrape/urls` | Zillow listing URLs | Fetch details via validated session pool |
 | `POST /v2/scrape/addresses` | Street addresses | Resolves via Zillow autocomplete while fetching completed resolutions |
 | `GET /health` | — | Pool stats |
@@ -105,7 +105,7 @@ at `http://localhost:8000/docs` after the server starts.
 ```bash
 curl --compressed -X POST http://localhost:8000/v2/search/listings \
   -H 'Content-Type: application/json' \
-  -d '{"location":"Naperville, IL","home_types":["multi_family"],"max_results":500,"include_details":true}'
+  -d '{"location":"Naperville, IL","home_types":["multi_family"],"max_results":500}'
 ```
 
 Accepts either `location` + `radius_miles` or an explicit
@@ -114,10 +114,12 @@ Accepts either `location` + `radius_miles` or an explicit
 (for `status: "sold"`). Results are deduplicated and checked against the actual
 radius or bbox; relaxed suggestions are excluded.
 
-Set `include_details: false` for faster search-card previews. Discovery uses an
-independent Evomi session pool, so preview searches do not require working
-property-detail sessions. `strict_location` now defaults to false; set it to
-true to also restrict a radius search to the resolved Zillow region. See
+The listings endpoint always returns search-card previews and uses its own
+validated Evomi session pool. Remove `include_details`, `concurrency`, and
+`cache_seconds` from listings requests; those fields are no longer accepted.
+Use `search_concurrency` to control discovery work. `strict_location` now defaults
+to false; set it to true to also restrict a radius search to the resolved Zillow
+region. See
 [the listings API guide](API.md#discover-listings-by-market) for both request formats,
 validation rules, and coverage limits.
 
