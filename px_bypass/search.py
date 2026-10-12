@@ -688,50 +688,58 @@ async def discover_zillow_listings(
     # bound the entire discovery run, rather than refetching every quadrant.
     queue = [(root_bounds, 0, 1)]
     seen_by_bounds: dict[tuple[float, ...], set[str]] = {}
+
+    def record_response(response):
+        bounds, depth, page, data = response
+        stats.tiled = stats.tiled or depth > 0
+        listings, total = extract_search_listings(data)
+        if depth == 0 and page == 1:
+            stats.total_result_count = total
+        bounds_key = tuple(bounds[key] for key in ("south", "west", "north", "east"))
+        seen = seen_by_bounds.setdefault(bounds_key, set())
+        new_ids = {item.zpid for item in listings} - seen
+        seen.update(new_ids)
+        for listing in listings:
+            reason = listing_area_rejection(listing, root_bounds, center, radius_miles)
+            if reason is None and strict_location and location and not listing_matches_location(listing, location):
+                reason = "out_of_location"
+            if reason:
+                rejected[reason].add(listing.zpid)
+            else:
+                by_zpid.setdefault(listing.zpid, listing)
+
+        total_pages = _to_int(_nested(data, "cat1", "searchList", "totalPages"))
+        incomplete = total > len(seen) if total is not None else bool(total_pages and page < total_pages)
+        if total is None and total_pages is None:
+            stats.coverage_limited = True
+        if not incomplete:
+            return
+        if page == 1 and tile_if_needed and depth < tile_depth:
+            queue.extend((child, depth + 1, 1) for child in split_bounds(bounds))
+        elif new_ids and (total_pages is None or page < total_pages):
+            queue.append((bounds, depth, page + 1))
+        else:
+            # Zillow can cap/duplicate pages or include non-property cards
+            # in its count. Do not claim the area was completely enumerated.
+            stats.coverage_limited = True
+
     while queue and len(by_zpid) < max_results and stats.search_requests < max_search_requests:
         count = min(search_concurrency, max_search_requests - stats.search_requests, len(queue))
         batch, queue = queue[:count], queue[count:]
         tasks = [asyncio.create_task(fetch_bounds(*job)) for job in batch]
+        stats.search_requests += len(tasks)
         try:
-            responses = await asyncio.gather(*tasks)
-        except BaseException:
+            for completed in asyncio.as_completed(tasks):
+                record_response(await completed)
+                if len(by_zpid) >= max_results:
+                    break
+        finally:
+            # A slow quadrant must not hold up a complete result set. Await
+            # cancellation so pooled connections and slot leases are released.
             for task in tasks:
-                task.cancel()
+                if not task.done():
+                    task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            raise
-        stats.search_requests += len(responses)
-        for bounds, depth, page, data in responses:
-            stats.tiled = stats.tiled or depth > 0
-            listings, total = extract_search_listings(data)
-            if depth == 0 and page == 1:
-                stats.total_result_count = total
-            bounds_key = tuple(bounds[key] for key in ("south", "west", "north", "east"))
-            seen = seen_by_bounds.setdefault(bounds_key, set())
-            new_ids = {item.zpid for item in listings} - seen
-            seen.update(new_ids)
-            for listing in listings:
-                reason = listing_area_rejection(listing, root_bounds, center, radius_miles)
-                if reason is None and strict_location and location and not listing_matches_location(listing, location):
-                    reason = "out_of_location"
-                if reason:
-                    rejected[reason].add(listing.zpid)
-                else:
-                    by_zpid.setdefault(listing.zpid, listing)
-
-            total_pages = _to_int(_nested(data, "cat1", "searchList", "totalPages"))
-            incomplete = total > len(seen) if total is not None else bool(total_pages and page < total_pages)
-            if total is None and total_pages is None:
-                stats.coverage_limited = True
-            if not incomplete:
-                continue
-            if page == 1 and tile_if_needed and depth < tile_depth:
-                queue.extend((child, depth + 1, 1) for child in split_bounds(bounds))
-            elif new_ids and (total_pages is None or page < total_pages):
-                queue.append((bounds, depth, page + 1))
-            else:
-                # Zillow can cap/duplicate pages or include non-property cards
-                # in its count. Do not claim the area was completely enumerated.
-                stats.coverage_limited = True
 
     stats.limit_reached = len(by_zpid) >= max_results
     if queue and not stats.limit_reached:

@@ -181,6 +181,91 @@ class SearchDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats.search_requests, 2)
         self.assertTrue(stats.coverage_limited)
 
+    async def test_result_limit_does_not_wait_for_slow_tiles(self):
+        children = search.split_bounds(BOUNDS)
+        slow_started = asyncio.Event()
+        started = stopped = 0
+
+        async def fetch(**kwargs):
+            nonlocal started, stopped
+            bounds = kwargs['payload']['searchQueryState']['mapBounds']
+            if bounds == BOUNDS:
+                return upstream([card(1)], 5, 2), 1
+            if bounds == children[0]:
+                await slow_started.wait()
+                # Duplicates and out-of-area rows must not satisfy the cap.
+                return upstream([card(1), card(2, lat=43), card(3)]), 1
+            started += 1
+            if started == 3:
+                slow_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped += 1
+
+        with patch.object(search, '_fetch_search_payload', fetch):
+            rows, _, stats = await asyncio.wait_for(search.discover_zillow_listings(
+                pool=None, bbox=BOUNDS, max_results=2, search_concurrency=4), 2)
+        self.assertEqual([row.zpid for row in rows], ['1', '3'])
+        self.assertEqual(stopped, 3)
+        self.assertEqual(stats.search_requests, 5)
+        self.assertEqual(stats.discarded_out_of_area, 1)
+        self.assertTrue(stats.limit_reached)
+
+    async def test_caller_cancellation_closes_all_inflight_tiles(self):
+        ready = asyncio.Event()
+        started = stopped = 0
+
+        async def fetch(**kwargs):
+            nonlocal started, stopped
+            if kwargs['payload']['searchQueryState']['mapBounds'] == BOUNDS:
+                return upstream([card(1)], 5, 2), 1
+            started += 1
+            if started == 4:
+                ready.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped += 1
+
+        with patch.object(search, '_fetch_search_payload', fetch):
+            task = asyncio.create_task(search.discover_zillow_listings(pool=None, bbox=BOUNDS))
+            try:
+                await asyncio.wait_for(ready.wait(), 2)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        self.assertEqual(stopped, 4)
+
+    async def test_failed_tile_cancels_unfinished_siblings(self):
+        children = search.split_bounds(BOUNDS)
+        ready = asyncio.Event()
+        started = stopped = 0
+
+        async def fetch(**kwargs):
+            nonlocal started, stopped
+            bounds = kwargs['payload']['searchQueryState']['mapBounds']
+            if bounds == BOUNDS:
+                return upstream([card(1)], 5, 2), 1
+            if bounds == children[0]:
+                await ready.wait()
+                raise search.SearchError('search unavailable')
+            started += 1
+            if started == 3:
+                ready.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped += 1
+
+        with patch.object(search, '_fetch_search_payload', fetch):
+            with self.assertRaisesRegex(search.SearchError, 'search unavailable'):
+                await asyncio.wait_for(search.discover_zillow_listings(pool=None, bbox=BOUNDS), 2)
+        self.assertEqual(stopped, 3)
+
     async def test_geocoding_failure_is_controlled(self):
         transport = httpx.MockTransport(lambda _: httpx.Response(503))
         real_client = httpx.AsyncClient

@@ -132,14 +132,40 @@ bad = [p for p, h in m['sha256'].items()
 assert not bad, f'Runtime files differ: {bad}'
 print('All recorded runtime hashes match')
 PY
-curl --fail --silent --show-error http://127.0.0.1:8000/health \
-  || echo 'Check health again after startup finishes.'
+curl --silent --show-error http://127.0.0.1:8000/health
 ```
 
-Startup may take a minute or longer while sessions are validated. Repeat the
-health check until `status` is `ok`. Wait for `live: 24` before a full-speed
-batch. For startup errors, run `sudo journalctl -u zillow -n 80 --no-pager`.
+Startup may take a minute or longer while sessions are validated. For listing
+searches, check `search_pool.live` (4 when fully ready). `status: "search-only"`
+and HTTP 503 on the combined health endpoint mean detail scraping is unavailable;
+listing discovery can still be ready. For startup errors, run
+`sudo journalctl -u zillow -n 80 --no-pager`.
 
+Verify the public listings endpoint and its result count:
+
+```bash
+"$APP/venv/bin/python" - <<'PYTEST'
+import time, httpx
+body = {
+    "bbox": {"north": 42.1, "south": 41.65, "east": -87.5, "west": -88.4},
+    "home_types": ["single_family"], "max_results": 1000,
+}
+started = time.monotonic()
+r = httpx.post('http://3.210.35.141/v2/search/listings', json=body, timeout=90)
+r.raise_for_status()
+data = r.json()
+ids = [item['zpid'] for item in data['results']]
+assert len(ids) == len(set(ids)), 'Duplicate listings'
+print({'unique': len(ids), 'elapsed_s': round(time.monotonic() - started, 2),
+       'search': data['summary']['search']})
+PYTEST
+```
+
+Check the returned count and coverage flags; available inventory varies. This
+endpoint always performs fresh discovery. Do not send `include_details`,
+`cache_seconds`, or `concurrency`.
+
+For the separate detail services, wait for `live: 24` before a full-speed batch.
 Test both public endpoints with caching disabled:
 
 ```bash

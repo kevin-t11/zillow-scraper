@@ -120,6 +120,11 @@ curl --compressed --max-time 180 \
   }'
 ```
 
+Parallel search responses are processed as they arrive. Once enough unique
+in-area listings are found, unfinished page/tile requests are cancelled.
+Results have no guaranteed order. The search request count includes requests
+started and then cancelled after reaching the result cap.
+
 Both modes return `results` and `summary`. `summary.area` echoes the actual
 bbox, radius center, radius and region restriction. `summary.applied_filters`
 reports the effective filters. `summary.search` includes upstream count,
