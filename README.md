@@ -108,8 +108,18 @@ curl --compressed -X POST http://localhost:8000/v2/search/listings \
   -d '{"location":"Naperville, IL","home_types":["multi_family"],"max_results":500,"include_details":true}'
 ```
 
-Set `include_details` to `false` for search-card previews. Search results depend
-on the upstream market response and the requested location and filters.
+Accepts either `location` + `radius_miles` or an explicit
+`bbox: {north, south, east, west}`. The modes cannot be combined. Supports
+`new_construction_only`, `year_built_min`, `year_built_max`, and `sold_in_last`
+(for `status: "sold"`). Results are deduplicated and checked against the actual
+radius or bbox; relaxed suggestions are excluded.
+
+Set `include_details: false` for faster search-card previews. Discovery uses an
+independent Evomi session pool, so preview searches do not require working
+property-detail sessions. `strict_location` now defaults to false; set it to
+true to also restrict a radius search to the resolved Zillow region. See
+[the listings API guide](API.md#discover-listings-by-market) for both request formats,
+validation rules, and coverage limits.
 
 ### `POST /v2/scrape/urls`
 

@@ -1,6 +1,6 @@
 {
   "source": "Lightsail production source snapshot",
-  "verified_date": "2026-10-11",
+  "verified_date": "2026-10-12",
   "original_remote": "https://github.com/ushixan/zillow-scraper.git",
   "deployed_base_commit": "f2b060e2ee268a8541652181b1f8028ee23857e0",
   "sha256": {
@@ -18,10 +18,10 @@
     "px_bypass/proxy.py": "e6e81996795b2d56c90de20014e5c94c9352b899dfd7e703c1e598d7c046150c",
     "px_bypass/queries/for_sale_non_priority.json": "20087e90707e231a65464ca456aecf23edc1850cc393221f2bb15a8e3b9e33cb",
     "px_bypass/resolver.py": "55ed217ddba03ed2e1b04c755c2bd12bf63217a0d7e454a3a838b9073d0a5161",
-    "px_bypass/routes.py": "1191598dd95d0b1b6e1b56a1a6f7cd3a763d75fea64b85f5f3c9eaaac23c5b85",
+    "px_bypass/routes.py": "2901e88b6f5fa4f4fc34c753bf84dde68bf2b3eaa76638f585ab1bcfa7215efd",
     "px_bypass/scraper.py": "083133a80281966c677d98cd2700c8edf61abd9977382dd9fd1320c1b0eed618",
-    "px_bypass/search.py": "f5159cabab78b3138c3457a64aaba10e6659ad0867c5bacae8ccfd4e175a4808",
-    "px_bypass/serve.py": "1ba380eee37a5e5d2875545875be0c215ddd1fda00a0f1dfdbf5c03b62ae9570",
+    "px_bypass/search.py": "1dc2fcce23a063da7507e7a8aa3e4ae596f8c785521df2dcb8aa617d5002e8bf",
+    "px_bypass/serve.py": "ce025ebb8a570cf6c7914790e05d5e3be6e1c2c4674841351a89dee9d7d5f887",
     "px_bypass/systemd-zillow.service": "660b496b22941cc337385ac0f5f7b684f4e3d56c81303f8c98703a1fe69c8599",
     "px_bypass/test_addresses.py": "054f0aaa475a05aeb88ca9f2fd5394742cc0f3b7c60c31fd6db0a0f559e12f31",
     "px_bypass/test_urls.py": "eff1bc44ac172f29f60812a48a7b892ac7413009baf31d472b4f3e285ae0b273",

@@ -39,27 +39,55 @@ The legacy routes in `app/server.py`, such as `/scrape` and `/scrape/urls`, are 
 
 `POST /v2/search/listings`
 
-The deployed search endpoint resolves the market, filters search cards to the
-requested location, and optionally fetches full property details. Its request
-schema and handler are preserved from the VM implementation.
+Choose exactly one area mode:
+
+- **Location + radius:** resolve a city, ZIP, county, or neighborhood and search
+  within `radius_miles` of its resolved center (12 miles by default). The server
+  uses a bounding rectangle upstream, then checks actual great-circle distance.
+- **BBox:** send `north`, `south`, `east`, and `west` in decimal degrees. This
+  skips location lookup and returns properties inside that rectangle, including
+  its edges. Do not send `location` or `radius_miles` with `bbox`.
+
+`strict_location: true` additionally intersects a location/radius search with
+Zillow's selected region and checks city/state/ZIP text where available. It is
+not a drawn polygon input. The default is now **false**, so a radius can include
+neighboring towns. Existing callers that need the earlier region restriction
+must explicitly send `strict_location: true`.
+
+Both modes exclude relaxed/nearby suggestions and listings without usable
+coordinates. Results are unique by ZPID. A rectangle is not a city boundary;
+custom polygons and antimeridian-crossing boxes are not accepted.
 
 | Field | Default | Limits or accepted values |
 |---|---|---|
-| `location` | Required | 2–200 characters |
+| `location` | None | 2–200 characters; required unless `bbox` is supplied |
+| `radius_miles` | 12 | 0.25–100; location mode only |
+| `bbox` | None | Object with `north`, `south`, `east`, `west`; south < north, west < east; latitude ±90, longitude ±180 |
+| `strict_location` | false | Restrict location mode to its resolved Zillow region as well as the radius |
 | `status` | `for_sale` | `for_sale`, `for_rent`, `sold` |
-| `home_types` | `["multi_family"]` | Nonempty array; `single_family`, `multi_family`, `townhouse`, `condo`, `land`, `apartment`, `manufactured`, `apartment_or_condo` |
-| `max_results` | 500 | 1–2,000 |
-| `include_details` | true | false returns search-card previews |
-| `radius_miles` | 12 | 0.25–100 |
-| `tile_if_needed` | true | Boolean |
+| `home_types` | `["multi_family"]` | Nonempty array: `single_family`, `multi_family`, `townhouse`, `condo`, `land`, `apartment`, `manufactured`, `apartment_or_condo`. Set this explicitly for the homes you want. |
+| `new_construction_only` | false | For-sale searches only; excludes agent/owner resale, auction and foreclosure sources |
+| `year_built_min`, `year_built_max` | None | Inclusive integer bounds, 1000–9999; either may be omitted; min ≤ max |
+| `sold_in_last` | None | Sold searches only: `"any"`, `"1"`, `"7"`, `"14"`, `"30"`, `"90"`, `"6m"`, `"12m"`, `"24m"`, `"36m"`. Numeric strings mean days; `m` means months. |
+| `max_results` | 500 | 1–2,000 unique matching properties; a cap, not a guaranteed count |
+| `include_details` | true | false returns search-card previews without fetching each property |
+| `tile_if_needed` | true | Split only truncated areas; paginate dense leaf areas |
 | `tile_depth` | 2 | 0–3 |
-| `search_concurrency` | 4 | 1–16 |
-| `concurrency` | 60 | 1–300; property detail retrieval |
-| `max_retries` | 3 | 1–10 |
-| `cache_seconds` | 86400 | 0–86400; property detail cache |
-| `include_fsbo`, `include_new_construction`, `include_coming_soon` | true | Boolean |
-| `include_foreclosures`, `include_auctions` | false | Boolean |
-| `strict_location` | true | Boolean |
+| `max_search_requests` | 25 | 1–100 search pages/tiles per request, excluding retries and session validation |
+| `search_concurrency` | 4 | 1–16 simultaneous page/tile requests |
+| `concurrency` | 60 | 1–300; property-detail retrieval |
+| `max_retries` | 3 | 1–10 attempts per upstream search/detail request |
+| `cache_seconds` | 86400 | 0–86400; property details only. Discovery is always fresh. |
+| `include_fsbo`, `include_new_construction`, `include_coming_soon` | true | For-sale inclusion flags; including new construction does not make it exclusive |
+| `include_foreclosures`, `include_auctions` | false | For-sale inclusion flags |
+
+`new_construction_only` overrides the other sale-source inclusion flags, but
+cannot be combined with `include_new_construction: false`. Its coming-soon
+listing-status setting still follows `include_coming_soon`.
+Unknown fields, mixed area modes, inverted bounds/ranges, and incompatible
+status/filter combinations return **HTTP 422** instead of silently ignoring inputs.
+
+Location/radius — newly built homes for sale:
 
 ```bash
 curl --compressed --max-time 180 \
@@ -67,21 +95,57 @@ curl --compressed --max-time 180 \
   -H 'Content-Type: application/json' \
   -d '{
     "location": "Naperville, IL",
-    "status": "for_sale",
-    "home_types": ["multi_family"],
-    "max_results": 500,
-    "include_details": true,
-    "cache_seconds": 0
+    "radius_miles": 10,
+    "home_types": ["single_family", "townhouse"],
+    "new_construction_only": true,
+    "year_built_min": 2020,
+    "year_built_max": 2026,
+    "max_results": 100,
+    "include_details": false
   }'
 ```
 
-Both modes return `results` and `summary`. Preview mode returns search-card
-fields and can omit the scrape `status` field. Detail mode merges those cards
-with property data and attaches a `search_preview` object. A card without a
-detail result can have `status: "search_only"`. Summary fields include the
-resolved location, discovered count, detail mode, and search request statistics.
-An upstream discovery error returns HTTP 502. The address and URL performance
-measurements do not establish search endpoint latency.
+BBox — homes sold in the last 12 months:
+
+```bash
+curl --compressed --max-time 180 \
+  -X POST 'http://localhost:8000/v2/search/listings' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "bbox": {"north": 41.84, "south": 41.66, "east": -88.05, "west": -88.25},
+    "status": "sold",
+    "sold_in_last": "12m",
+    "home_types": ["single_family"],
+    "year_built_min": 2000,
+    "max_results": 100,
+    "include_details": false
+  }'
+```
+
+Both modes return `results` and `summary`. `summary.area` echoes the actual
+bbox, radius center, radius and region restriction. `summary.applied_filters`
+reports the effective filters. `summary.search` includes upstream count,
+request count, discarded geography/missing-coordinate counts, `limit_reached`
+and `coverage_limited`. The upstream count can include unmappable cards or
+properties outside the radius circle; it is not the returned unique count.
+`coverage_limited: true` means a request budget, upstream cap, unknown count,
+or repeated page prevented complete enumeration. `limit_reached: true` means
+the requested result cap was met. Neither promises that every property in a
+large area has been enumerated.
+
+Preview mode is fastest: it avoids one detail fetch per property. Detail mode
+merges property data and attaches `search_preview`; fresh search coordinates
+and listing status take precedence over cached details. A card without a detail
+result can have `status: "search_only"`. Use `cache_seconds: 0` when full details
+must also be freshly fetched. Smaller areas and narrower upstream filters can
+reduce work; the address/URL benchmarks do not establish search latency.
+
+Discovery uses its own validated Evomi session pool (`SEARCH_POOL_SIZE`, default
+4). Preview searches can work while property-detail requests are blocked.
+`/health` reports both pools and returns HTTP 503 with `status: "search-only"`
+when only discovery is available. Full-detail requests that need uncached
+properties return HTTP 503 when detail sessions are unavailable. No live search
+sessions also produces HTTP 503; upstream search/location errors produce HTTP 502.
 
 ## Scrape by URL
 
@@ -272,7 +336,7 @@ Illustrative health response:
 }
 ```
 
-`size` is configured pool capacity, `live` is usable slots, `mints` counts successful fresh mints, `refreshes` counts refreshes, and `rehydrated` counts restored slots. Actual counters depend on startup and usage. Health returns HTTP 200 only when a session has fetched a validation property successfully. When no validated slots are live, it returns HTTP 503 with `status: "no-cookies"`. `refreshing`, `validation_failures`, and `last_error` describe recovery. Uncached scrape requests return HTTP 503 with `Retry-After: 60` while unavailable. If all sessions fail during a batch, session acquisition waits at most 30 seconds before remaining rows receive `status: "blocked"`. Recovery retries pause for 60 seconds after a failure. Sessions expire after 25 minutes by default during runtime and are validated again when restored at startup. `session_strategy` identifies the HTTP or legacy browser path. `recovery_active`, `last_recovery_started_at`, and `last_recovery_completed_at` expose recovery progress; `oldest_session_age_s` and `last_success_at` describe usable sessions. Validation is a point-in-time check, not a guarantee that the next request will succeed. Every actual network attempt, including 403 and invalid JSON responses, consumes `max_retries`.
+`size` is configured pool capacity, `live` is usable slots, `mints` counts successful fresh mints, `refreshes` counts refreshes, and `rehydrated` counts restored slots. Actual counters depend on startup and usage. Health returns HTTP 200 only when both property-detail and search pools have validated sessions. `search_pool` contains discovery-session counters. A partial outage returns HTTP 503 with `status: "search-only"` or `"details-only"`; when neither pool is available it reports `"no-cookies"`. `refreshing`, `validation_failures`, and `last_error` describe recovery. Uncached scrape requests return HTTP 503 with `Retry-After: 60` while unavailable. If all sessions fail during a batch, session acquisition waits at most 30 seconds before remaining rows receive `status: "blocked"`. Recovery retries pause for 60 seconds after a failure. Sessions expire after 25 minutes by default during runtime and are validated again when restored at startup. `session_strategy` identifies the HTTP or legacy browser path. `recovery_active`, `last_recovery_started_at`, and `last_recovery_completed_at` expose recovery progress; `oldest_session_age_s` and `last_success_at` describe usable sessions. Validation is a point-in-time check, not a guarantee that the next request will succeed. Every actual network attempt, including 403 and invalid JSON responses, consumes `max_retries`.
 
 `/info` returns `name`, `version`, `description`, and an `endpoints` array with request schemas and examples.
 

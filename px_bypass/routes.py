@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models import PropertyListing
 from .cache import TTLCache, normalize_address
@@ -62,16 +62,35 @@ ZillowHomeType = Literal[
 ]
 
 
+class SearchBounds(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    north: float = Field(..., ge=-90, le=90, strict=True)
+    south: float = Field(..., ge=-90, le=90, strict=True)
+    east: float = Field(..., ge=-180, le=180, strict=True)
+    west: float = Field(..., ge=-180, le=180, strict=True)
+
+    @model_validator(mode="after")
+    def ordered_bounds(self):
+        if self.south >= self.north or self.west >= self.east:
+            raise ValueError("bbox requires south < north and west < east; split antimeridian searches into two boxes")
+        return self
+
+
 class SearchListingsRequest(BaseModel):
-    location: str = Field(..., min_length=2, max_length=200)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, allow_inf_nan=False)
+
+    location: str | None = Field(None, min_length=2, max_length=200)
+    bbox: SearchBounds | None = None
     status: ZillowSearchStatus = "for_sale"
     home_types: list[ZillowHomeType] = Field(default_factory=lambda: ["multi_family"], min_length=1)
     max_results: int = Field(500, ge=1, le=2000)
     include_details: bool = True
-    radius_miles: float = Field(12.0, ge=0.25, le=100)
+    radius_miles: float = Field(12.0, ge=0.25, le=100, strict=True)
     tile_if_needed: bool = True
     tile_depth: int = Field(2, ge=0, le=3)
     search_concurrency: int = Field(4, ge=1, le=16)
+    max_search_requests: int = Field(25, ge=1, le=100)
     concurrency: int = Field(60, ge=1, le=300)
     max_retries: int = Field(3, ge=1, le=10)
     cache_seconds: int = Field(86400, ge=0, le=86400)
@@ -80,7 +99,31 @@ class SearchListingsRequest(BaseModel):
     include_coming_soon: bool = True
     include_foreclosures: bool = False
     include_auctions: bool = False
-    strict_location: bool = True
+    strict_location: bool = Field(False, description="Also restrict location/radius searches to Zillow's resolved region.")
+    new_construction_only: bool = False
+    year_built_min: int | None = Field(None, ge=1000, le=9999, strict=True)
+    year_built_max: int | None = Field(None, ge=1000, le=9999, strict=True)
+    sold_in_last: Literal["any", "1", "7", "14", "30", "90", "6m", "12m", "24m", "36m"] | None = None
+
+    @model_validator(mode="after")
+    def validate_search(self):
+        if (self.location is None) == (self.bbox is None):
+            raise ValueError("Provide either location (with optional radius_miles) or bbox, exclusively")
+        if self.bbox is not None:
+            if "radius_miles" in self.model_fields_set:
+                raise ValueError("radius_miles cannot be combined with bbox")
+            if self.strict_location:
+                raise ValueError("strict_location requires location, not bbox")
+        if self.year_built_min is not None and self.year_built_max is not None and self.year_built_min > self.year_built_max:
+            raise ValueError("year_built_min must be <= year_built_max")
+        if self.sold_in_last is not None and self.status != "sold":
+            raise ValueError("sold_in_last requires status='sold'")
+        if self.new_construction_only:
+            if self.status != "for_sale":
+                raise ValueError("new_construction_only requires status='for_sale'")
+            if not self.include_new_construction:
+                raise ValueError("new_construction_only conflicts with include_new_construction=false")
+        return self
 
 
 class ScrapeResponse(BaseModel):
@@ -97,6 +140,16 @@ def _pool(request: Request) -> "CookiePool":
         raise HTTPException(503, "Server is still booting — pool not ready.")
     if pool.stats["live"] == 0:
         raise HTTPException(503, "No validated scraping session is available; recovery is in progress.",
+                            headers={"Retry-After": "60"})
+    return pool
+
+
+def _search_pool(request: Request) -> "CookiePool":
+    pool = getattr(request.app.state, "search_pool", None)
+    if pool is None:
+        raise HTTPException(503, "Search sessions are not ready", headers={"Retry-After": "60"})
+    if pool.stats["live"] == 0:
+        raise HTTPException(503, "No validated search session is available; recovery is in progress",
                             headers={"Retry-After": "60"})
     return pool
 
@@ -158,8 +211,8 @@ async def info() -> dict:
                 "method": "POST",
                 "path": "/v2/search/listings",
                 "summary": (
-                    "Discover Zillow listings by market/filter, optionally hydrate "
-                    "each result through the detail scraper."
+                    "Discover listings inside a location/radius or bbox, with construction, "
+                    "year-built and sold-date filters. Optionally fetch property details."
                 ),
                 "request": SearchListingsRequest.model_json_schema(),
                 "example": {
@@ -169,6 +222,12 @@ async def info() -> dict:
                     "max_results": 500,
                     "include_details": True,
                     "radius_miles": 12,
+                },
+                "bbox_example": {
+                    "bbox": {"north": 41.84, "south": 41.66, "east": -88.05, "west": -88.25},
+                    "status": "sold", "sold_in_last": "12m",
+                    "home_types": ["single_family"], "year_built_min": 2000,
+                    "include_details": False,
                 },
             },
             {
@@ -187,7 +246,15 @@ async def health(request: Request):
         "status": "ok" if pool.stats["live"] > 0 else "no-cookies",
         **pool.stats,
     }
-    return JSONResponse(payload, status_code=200 if pool.stats["live"] > 0 else 503)
+    search_pool = getattr(request.app.state, "search_pool", None)
+    if search_pool is not None:
+        payload["search_pool"] = search_pool.stats
+        if pool.stats["live"] == 0 and search_pool.stats["live"] > 0:
+            payload["status"] = "search-only"
+        elif pool.stats["live"] > 0 and search_pool.stats["live"] == 0:
+            payload["status"] = "details-only"
+    healthy = pool.stats["live"] > 0 and (search_pool is None or search_pool.stats["live"] > 0)
+    return JSONResponse(payload, status_code=200 if healthy else 503)
 
 
 def _zpid_of(url: str) -> str | None:
@@ -445,18 +512,24 @@ def _merge_preview_into_detail(detail: PropertyListing, preview: SearchListingPr
         data["photos"] = [preview.image]
         data["photo_count"] = max(data.get("photo_count") or 0, 1)
     data["search_preview"] = preview_data
+    # Search membership and map coordinates come from this fresh discovery,
+    # even when detail data came from the shared property cache.
+    for key in ("latitude", "longitude", "listing_status"):
+        if preview_data[key] not in (None, ""):
+            data[key] = preview_data[key]
     return data
 
 
 @router.post("/v2/search/listings", response_model=ScrapeResponse)
 async def search_listings_v2(req: SearchListingsRequest, request: Request) -> ScrapeResponse:
     t_total = time.monotonic()
-    pool = _pool(request)
+    pool = _search_pool(request)
 
     try:
         previews, location, search_stats = await discover_zillow_listings(
             pool=pool,
             location_query=req.location,
+            bbox=req.bbox.model_dump() if req.bbox is not None else None,
             status=req.status,
             home_types=list(req.home_types),
             max_results=req.max_results,
@@ -464,6 +537,7 @@ async def search_listings_v2(req: SearchListingsRequest, request: Request) -> Sc
             tile_if_needed=req.tile_if_needed,
             tile_depth=req.tile_depth,
             search_concurrency=req.search_concurrency,
+            max_search_requests=req.max_search_requests,
             max_retries=req.max_retries,
             include_fsbo=req.include_fsbo,
             include_new_construction=req.include_new_construction,
@@ -471,15 +545,44 @@ async def search_listings_v2(req: SearchListingsRequest, request: Request) -> Sc
             include_foreclosures=req.include_foreclosures,
             include_auctions=req.include_auctions,
             strict_location=req.strict_location,
+            new_construction_only=req.new_construction_only,
+            year_built_min=req.year_built_min,
+            year_built_max=req.year_built_max,
+            sold_in_last=req.sold_in_last,
         )
     except SearchError as e:
         raise HTTPException(502, str(e)) from e
+
+    search_summary = {
+        "total_result_count": search_stats.total_result_count,
+        "requests": search_stats.search_requests,
+        "tiled": search_stats.tiled,
+        "discarded_out_of_location": search_stats.discarded_out_of_location,
+        "discarded_out_of_area": search_stats.discarded_out_of_area,
+        "discarded_missing_coordinates": search_stats.discarded_missing_coordinates,
+        "coverage_limited": search_stats.coverage_limited,
+        "limit_reached": search_stats.limit_reached,
+        "elapsed_s": round(search_stats.elapsed_s, 2),
+    }
+    applied_filters = req.model_dump(include={
+        "status", "home_types", "new_construction_only", "year_built_min", "year_built_max",
+        "sold_in_last", "include_fsbo", "include_new_construction", "include_coming_soon",
+        "include_foreclosures", "include_auctions",
+    })
+    if req.new_construction_only or req.status != "for_sale":
+        for key in ("include_fsbo", "include_foreclosures", "include_auctions"):
+            applied_filters[key] = False
+    if req.status != "for_sale":
+        applied_filters["include_new_construction"] = False
+        applied_filters["include_coming_soon"] = False
 
     if not req.include_details:
         return ScrapeResponse(
             results=[p.to_dict() for p in previews],
             summary={
-                "location": location.display,
+                "location": location.display if location else None,
+                "area": search_stats.area,
+                "applied_filters": applied_filters,
                 "status": req.status,
                 "home_types": list(req.home_types),
                 "discovered": len(previews),
@@ -487,15 +590,10 @@ async def search_listings_v2(req: SearchListingsRequest, request: Request) -> Sc
                 "success": len(previews),
                 "with_images": sum(1 for p in previews if p.image),
                 "include_details": False,
-                "search": {
-                    "total_result_count": search_stats.total_result_count,
-                    "requests": search_stats.search_requests,
-                    "tiled": search_stats.tiled,
-                    "discarded_out_of_location": search_stats.discarded_out_of_location,
-                    "elapsed_s": round(search_stats.elapsed_s, 2),
-                },
+                "search": search_summary,
                 "elapsed_s": round(time.monotonic() - t_total, 2),
                 "pool": _pool_stats_or_empty(request),
+                "search_pool": pool.stats,
             },
         )
 
@@ -511,12 +609,13 @@ async def search_listings_v2(req: SearchListingsRequest, request: Request) -> Sc
     stats = None
     fresh: list[PropertyListing] = []
     if misses:
+        detail_pool = _pool(request)
         fresh, stats = await scrape_urls_via_px(
             misses,
             concurrency=req.concurrency,
             max_retries=req.max_retries,
             skip_direct=True,
-            pool=pool,
+            pool=detail_pool,
         )
         for result in fresh:
             if result.zpid:
@@ -541,7 +640,9 @@ async def search_listings_v2(req: SearchListingsRequest, request: Request) -> Sc
     return ScrapeResponse(
         results=results,
         summary={
-            "location": location.display,
+            "location": location.display if location else None,
+            "area": search_stats.area,
+            "applied_filters": applied_filters,
             "status": req.status,
             "home_types": list(req.home_types),
             "discovered": len(previews),
@@ -554,16 +655,11 @@ async def search_listings_v2(req: SearchListingsRequest, request: Request) -> Sc
             "with_images": sum(1 for r in results if r.get("photos")),
             "with_description": sum(1 for r in results if r.get("description")),
             "include_details": True,
-            "search": {
-                "total_result_count": search_stats.total_result_count,
-                "requests": search_stats.search_requests,
-                "tiled": search_stats.tiled,
-                "discarded_out_of_location": search_stats.discarded_out_of_location,
-                "elapsed_s": round(search_stats.elapsed_s, 2),
-            },
+            "search": search_summary,
             "scrape_elapsed_s": round(stats.elapsed_s, 2) if stats else 0.0,
             "rate_per_sec": round(stats.rate, 2) if stats else 0.0,
             "elapsed_s": round(time.monotonic() - t_total, 2),
             "pool": _pool_stats_or_empty(request),
+            "search_pool": pool.stats,
         },
     )

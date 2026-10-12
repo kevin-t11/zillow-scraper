@@ -14,6 +14,7 @@ Environment:
     API_PORT              8000
     POOL_SIZE             24      (cookies in rotation)
     POOL_PER_SLOT_C       5       (concurrent reqs per cookie)
+    SEARCH_POOL_SIZE      4       (independently validated discovery sessions)
     HEADLESS              true    (set "false" on a desktop for debugging)
     EVOMI_USERNAME        required
     EVOMI_PASSWORD        required
@@ -24,6 +25,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
@@ -32,6 +34,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from .cookie_pool import CookiePool
 from .session_worker import IsolatedMinter
 from .routes import router
+from .search import SearchCookiePool
 
 logger = logging.getLogger("px_bypass.serve")
 
@@ -49,8 +52,15 @@ async def lifespan(app: FastAPI):
     app.state.minter = minter
     app.state.pool = pool
     try:
+        search_pool = await SearchCookiePool.create(
+            minter.mint, int(os.getenv("SEARCH_POOL_SIZE", "4")), per_slot_concurrency=per_slot_c,
+            persist_path=Path(os.getenv("SEARCH_POOL_PERSIST", str(Path.home() / ".cache/zillow_pool/search-slots.json"))),
+        )
+        app.state.search_pool = search_pool
         yield
     finally:
+        if getattr(app.state, "search_pool", None) is not None:
+            await app.state.search_pool.aclose()
         logger.info("shutting down…")
         await pool.aclose()
         await minter.close()
