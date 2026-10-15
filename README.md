@@ -4,7 +4,8 @@ Maintained repository: [kevin-t11/zillow-scraper](https://github.com/kevin-t11/z
 The original source remote is [ushixan/zillow-scraper](https://github.com/ushixan/zillow-scraper);
 its Git history is retained. Runtime code in this snapshot matches the deployed
 Lightsail service, including market search and both listing performance updates.
-See [DEPLOYMENT.md](DEPLOYMENT.md) for configuration and verification.
+See [DEPLOYMENT.md](DEPLOYMENT.md) for configuration and verification, and
+[reliability guidance](deploy/RELIABILITY.md) for recovery behavior and upstream limits.
 
 Fetches public Zillow listing details through validated Evomi residential HTTP
 sessions. Property details use a pinned Chrome-compatible `curl_cffi` transport;
@@ -32,8 +33,9 @@ addresses → autocomplete → listing URLs
 ```
 
 The pool validates each session against a known property, limits concurrent
-requests per session, expires sessions during runtime, and replaces rejected
-sessions with backoff. The API starts after its first usable session; remaining
+requests per session, renews sessions before expiry, and replaces rejected
+sessions with backoff. Working sessions remain available while replacements
+validate; one failed replacement does not pause recovery of healthy capacity. The API starts after its first usable session; remaining
 slots fill in the background. Failed JSON, GraphQL errors, and 403 responses all
 count against the request budget.
 

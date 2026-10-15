@@ -17,6 +17,7 @@ from typing import Iterable, Optional
 import httpx
 
 from app.scraper import (
+    AmbiguousAddressError,
     get_address_unit,
     get_zpid_via_autocomplete,
     get_zpid_via_zillow_search,
@@ -33,13 +34,16 @@ async def resolve_one(
         r = await get_zpid_via_autocomplete(client, address, prefer_full_address=True)
         if r:
             return (address, r[0], r[1])
+    except AmbiguousAddressError:
+        return None
     except Exception as e:
         logger.debug("autocomplete error for %r: %s", address, e)
 
-    # Search returns its first property without proving the unit identity.
+    # Units need explicit autocomplete identity; search links must match the
+    # supplied address rather than returning the first nearby home.
     if use_search_fallback and not get_address_unit(address):
         try:
-            r = await get_zpid_via_zillow_search(client, address)
+            r = await get_zpid_via_zillow_search(client, address, require_address_match=True)
             if r:
                 return (address, r[0], r[1])
         except Exception as e:

@@ -147,6 +147,54 @@ def get_address_unit(value: str) -> str | None:
     return match.group(1).upper().replace("-", "") if match else None
 
 
+class AmbiguousAddressError(ValueError):
+    """Several property IDs match the supplied address; do not guess one."""
+
+
+_STREET_ALIASES = {
+    "NORTH": "N", "SOUTH": "S", "EAST": "E", "WEST": "W",
+    "NORTHEAST": "NE", "NORTHWEST": "NW", "SOUTHEAST": "SE", "SOUTHWEST": "SW",
+    "STREET": "ST", "AVENUE": "AVE", "BOULEVARD": "BLVD", "DRIVE": "DR",
+    "COURT": "CT", "ROAD": "RD", "LANE": "LN", "CIRCLE": "CIR",
+    "TERRACE": "TER", "PLACE": "PL", "PARKWAY": "PKWY", "TRAIL": "TRL",
+    "HIGHWAY": "HWY", "SQUARE": "SQ", "SAINT": "ST",
+}
+
+
+def autocomplete_address_matches(address: str, display: str, unit_number: str = "") -> bool:
+    """Check supplied components, allowing standard street abbreviations.
+
+    Some displays omit the comma before the city. Compare full tokenized
+    addresses when state and ZIP are supplied, including directional suffixes.
+    This is not a fuzzy geocoder: uncertain matches fail closed.
+    """
+    parsed = parse_input_address(address)
+    if not parsed["street_number"]:
+        return False
+    requested_unit = get_address_unit(address)
+    candidate_unit = str(unit_number).upper().replace("-", "") or get_address_unit(display)
+    if requested_unit != candidate_unit:
+        return False
+
+    full_address = bool(parsed["state"] and parsed["zipcode"])
+
+    def tokens(value):
+        if not full_address and "," in address:
+            value = value.split(",", 1)[0]
+        value = _UNIT_RE.sub("", value)
+        value = re.sub(r"\b(\d{5})-\d{4}\b", r"\1", value)
+        return [_STREET_ALIASES.get(word, word) for word in re.findall(r"[A-Z0-9]+", value.upper())]
+
+    wanted, candidate = tokens(address), tokens(display)
+    if not wanted or (candidate != wanted if full_address else candidate[:len(wanted)] != wanted):
+        return False
+    if parsed["state"] and not re.search(r"\b" + re.escape(parsed["state"]) + r"\b", display.upper()):
+        return False
+    if parsed["zipcode"] and not re.search(r"\b" + re.escape(parsed["zipcode"]) + r"\b", display):
+        return False
+    return True
+
+
 async def get_zpid_via_autocomplete(
     client: httpx.AsyncClient, address: str, *, prefer_full_address: bool = False,
 ) -> Optional[tuple[str, str]]:
@@ -184,6 +232,7 @@ async def get_zpid_via_autocomplete(
             if resp.status_code != 200:
                 continue
 
+            candidates = {}
             for r in resp.json().get("results", []):
                 meta = r.get("metaData", {})
                 zpid = meta.get("zpid")
@@ -191,6 +240,10 @@ async def get_zpid_via_autocomplete(
                     continue
                 zpid = str(zpid)
                 display = r.get("display", "")
+
+                if prefer_full_address and not autocomplete_address_matches(
+                    address, display, meta.get("unitNumber") or ""):
+                    continue
 
                 candidate_unit = (
                     str(meta.get("unitNumber") or "").upper().replace("-", "")
@@ -210,15 +263,26 @@ async def get_zpid_via_autocomplete(
                     continue
 
                 logger.debug(f"  Autocomplete: zpid={zpid} | {display}")
-                return (zpid, f"https://www.zillow.com/homedetails/{zpid}_zpid/")
+                candidates[zpid] = f"https://www.zillow.com/homedetails/{zpid}_zpid/"
+                if not prefer_full_address:
+                    break
 
+            if len(candidates) > 1:
+                raise AmbiguousAddressError("Multiple property IDs match the supplied address")
+            if candidates:
+                return next(iter(candidates.items()))
+
+        except AmbiguousAddressError:
+            raise
         except Exception as e:
             logger.debug(f"  Autocomplete failed for '{query}': {e}")
 
     return None
 
 
-async def get_zpid_via_zillow_search(client: httpx.AsyncClient, address: str) -> Optional[tuple[str, str]]:
+async def get_zpid_via_zillow_search(
+    client: httpx.AsyncClient, address: str, *, require_address_match: bool = False,
+) -> Optional[tuple[str, str]]:
     parsed = parse_input_address(address)
     search_term = f"{parsed['full_street']} {parsed['zipcode']}"
     search_url = f"https://www.zillow.com/homes/{urllib.parse.quote(search_term)}_rb/"
@@ -231,12 +295,22 @@ async def get_zpid_via_zillow_search(client: httpx.AsyncClient, address: str) ->
         final_url = str(resp.url)
         zpid_in_url = re.search(r'/(\d+)_zpid', final_url)
         if zpid_in_url:
-            return (zpid_in_url.group(1), final_url)
+            slug = urllib.parse.unquote(urllib.parse.urlparse(final_url).path).rstrip('/').split('/')[-2]
+            if not require_address_match or autocomplete_address_matches(address, slug.replace('-', ' ')):
+                return (zpid_in_url.group(1), final_url)
+            return None
 
-        matches = re.findall(r'/homedetails/[^"]+?/(\d+)_zpid/', resp.text)
-        if matches:
-            zpid = matches[0]
-            return (zpid, f"https://www.zillow.com/homedetails/{zpid}_zpid/")
+        matches = re.findall(r'(/homedetails/([^"<>/]+)/(\d+)_zpid/)', resp.text)
+        candidates = {}
+        for link, slug, zpid in matches:
+            if require_address_match and not autocomplete_address_matches(
+                address, urllib.parse.unquote(slug).replace('-', ' ')):
+                continue
+            candidates[zpid] = f"https://www.zillow.com{link}"
+            if not require_address_match:
+                return (zpid, f"https://www.zillow.com/homedetails/{zpid}_zpid/")
+        if len(candidates) == 1:
+            return next(iter(candidates.items()))
 
     except Exception as e:
         logger.debug(f"  Zillow search failed: {e}")

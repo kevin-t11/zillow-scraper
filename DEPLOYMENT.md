@@ -182,6 +182,16 @@ curl --fail --silent --show-error --compressed --max-time 180 \
   -d '{"addresses":["6910 Farragut Ave, Falls Church, VA 22042"],"cache_seconds":0}'
 ```
 
+For repeatable checks of all endpoints, also run:
+
+```bash
+"$APP/venv/bin/python" -m px_bypass.check_service \
+  --base-url http://127.0.0.1:8000 --rounds 3 --interval 30
+```
+
+The command verifies fresh property IDs and fields, not only health. See
+[reliability guidance](deploy/RELIABILITY.md) for its limits.
+
 Each response should contain one successful listing with ZPID `51816594`, zero
 blocks, and zero cache hits. Check the listing result as well as the HTTP status.
 See [API.md](API.md) for bulk benchmarks and request settings.

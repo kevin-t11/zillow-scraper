@@ -195,3 +195,40 @@ The release and rollback folder is
 The new dependency is installed in a separate release virtual environment;
 existing VM dependency versions are constrained to the previous release.
 No credentials, cookies, proxy IPs, or property payloads are committed.
+
+
+## Session lifecycle and address reliability on October 15
+
+Session replacement now begins before hard expiry and is staggered across the
+pool. A failed candidate cannot evict a working session. Failures back off per
+slot while healthy capacity exists, with a shared probe budget during complete
+outages. Startup validates one restored session before serving and validates
+the remainder in the background. Late failures from retired clients cannot
+invalidate their replacements.
+
+Address resolution now checks the full supplied address with conservative
+abbreviation normalization and rejects ambiguous IDs. Search fallback no longer
+selects the first property without checking the address. A live autocomplete
+example returned the requested Marina Pacifica address alongside distinct north
+and south variants; full-address matching selects only the requested variant.
+This fixes reproduced selection weaknesses, but does not establish which
+property caused the uncaptured mismatch in the earlier deployment.
+
+All 92 regression tests passed locally and on the staged Lightsail build. Both
+local and VM live tests ran 12 rounds with six properties through each detail
+endpoint: 144 fresh detail fetches per environment, with exact IDs and full fields.
+A temporary 90-second TTL exercised renewal, one session was deliberately marked
+rejected, and the app was restarted between phases. All rounds passed, including
+search checks. Local and VM runs recorded 16 and 15 proactive detail renewals,
+respectively. A local 100-property batch passed both endpoints with caching
+disabled; the staged VM separately matched all 100 address resolutions.
+These accelerated tests establish recovery behavior, not multi-day uptime.
+
+The versioned `python -m px_bypass.check_service` command checks actual fresh
+data from all endpoints and exits nonzero on mismatched IDs, cached canary
+responses or failures. It does not install a recurring job. See
+[reliability guidance](RELIABILITY.md) for operating limits and supported-source
+options. The runtime remains Evomi-proxy-only.
+
+The release and rollback folder is
+`/home/ubuntu/zillow-deploy-backups/reliability-20261015`.

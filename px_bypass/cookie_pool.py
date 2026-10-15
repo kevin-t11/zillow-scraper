@@ -92,6 +92,11 @@ class CookiePool:
         self._refreshes = 0
         self._persist_path = persist_path or DEFAULT_PERSIST_PATH
         self._persist_ttl_s = persist_ttl_s
+        # Leave time for validation and a failed replacement before hard expiry.
+        # Spread renewal across the pool instead of retiring a startup cohort.
+        self._renew_before_s = min(180.0, persist_ttl_s / 3)
+        self._renewals = 0
+        self._slot_retry_after: dict[int, float] = {}
         self._rehydrated = 0
         self._session_wait_s = session_wait_s
         self._retry_delay_s = retry_delay_s
@@ -134,7 +139,9 @@ class CookiePool:
         else:
             logger.info("minting initial cookie pool of %d…", size)
 
-        # Persisted cookies also need proof of access before becoming usable.
+        # Validate one restored session before serving; validate the rest in
+        # the background. A bad persisted pool must not cause 24 serial
+        # network timeouts before the API can start and report its health.
         for slot in list(pool._slots):
             if slot is None:
                 continue
@@ -144,9 +151,10 @@ class CookiePool:
             except Exception:
                 await slot.client.aclose()
                 pool._slots[slot.idx] = None
+            break
 
         # Probe one fresh session before spending bandwidth on an entire pool.
-        if not any(pool._slots):
+        if not pool._has_live_slots():
             try:
                 await pool._mint(0)
             except Exception as exc:
@@ -159,7 +167,7 @@ class CookiePool:
 
         # Serve after the first validated slot; fill the pool with bounded,
         # serialized background recovery instead of blocking startup for minutes.
-        live = sum(1 for s in pool._slots if s is not None and not s.dead)
+        live = sum(1 for s in pool._slots if s is not None and pool.usable(s))
         logger.info("cookie pool ready: %d/%d live (rehydrated=%d, fresh=%d)",
                     live, size, rehydrated, pool._mints)
         pool._persist_to_disk()
@@ -191,13 +199,21 @@ class CookiePool:
     def _expire_slots(self) -> None:
         now = time.time()
         for slot in self._slots:
-            if slot is not None and not slot.dead and now - slot.minted_at >= self._persist_ttl_s:
+            if slot is None or slot.dead:
+                continue
+            age = now - slot.minted_at
+            if age >= self._persist_ttl_s:
                 self.mark_dead(slot, reason="session age limit")
+            elif age >= self._persist_ttl_s - self._renew_before_s * (1 + slot.idx / max(1, self._size)):
+                self._schedule_refresh(slot.idx)
+
+    def _has_live_slots(self) -> bool:
+        return any(slot is not None and self.usable(slot) for slot in self._slots)
 
     async def _maintain(self) -> None:
         while not self._closing:
             self._expire_slots()
-            await asyncio.sleep(min(15.0, max(0.01, self._persist_ttl_s / 2)))
+            await asyncio.sleep(min(15.0, max(0.01, self._renew_before_s / 4)))
 
     def _spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -212,7 +228,7 @@ class CookiePool:
 
     def _schedule_missing(self) -> None:
         for idx, slot in enumerate(self._slots):
-            if slot is None:
+            if slot is None or not slot.validated:
                 self._schedule_refresh(idx)
 
     # ── Persistence ─────────────────────────────────────────────────
@@ -305,14 +321,8 @@ class CookiePool:
             cookies = {} if self._prefer_http_sessions else await self._mint_fn(session_id=session_id)
         except Exception as e:
             logger.warning("pool[%d] mint failed (%s)", idx, type(e).__name__)
-            self._slots[idx] = None
-            if old is not None:
-                self._spawn(_close_later(old.client))
             raise
         if not self._prefer_http_sessions and "JSESSIONID" not in cookies and "_px3" not in cookies:
-            self._slots[idx] = None
-            if old is not None:
-                self._spawn(_close_later(old.client))
             raise RuntimeError(f"pool[{idx}] no usable session in {list(cookies)}")
         client = self._build_client(session_id)
         slot = CookieSlot(
@@ -327,11 +337,12 @@ class CookiePool:
             if isinstance(exc, Exception):
                 self._validation_failures += 1
                 self._last_error = _failure_reason(exc)
-            self._slots[idx] = None
-            if old is not None:
-                self._spawn(_close_later(old.client))
+            # A rejected candidate must not evict a still-working session.
+            # Expired/dead slots remain unusable until a replacement validates.
             raise
         slot.validated = True
+        if old is not None and self.usable(old):
+            self._renewals += 1
         self._slots[idx] = slot
         self._mints += 1
         # close old client lazily — workers may still hold it
@@ -381,27 +392,47 @@ class CookiePool:
         if slot.dead:
             return
         slot.dead = True
+        if self._slots[slot.idx] is not slot:
+            return  # an in-flight request used a session already replaced
         logger.info("pool[%d] unavailable (%s); %d leases — scheduling refresh", slot.idx, reason, slot.hits)
         self._schedule_refresh(slot.idx)
 
     async def _refresh(self, idx: int) -> None:
         try:
             while not self._closing:
-                # A failed validation pauses all refreshes, rather than burning
-                # replacement cookies concurrently during an upstream outage.
+                # Back off this slot without holding up unrelated replacements.
+                delay = self._slot_retry_after.get(idx, 0.0) - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
                 async with self._recovery_lock:
-                    delay = self._retry_after - time.monotonic()
+                    # A complete outage still gets only one probe per cooldown.
+                    delay = self._retry_after - time.monotonic() if not self._has_live_slots() else 0
                     if delay > 0:
                         await asyncio.sleep(delay)
                     self._recovery_active = True
                     self._last_recovery_started_at = time.time()
                     try:
-                        await self._mint(idx)
+                        restored = self._slots[idx]
+                        if restored is not None and not restored.validated and not restored.dead:
+                            try:
+                                await self._validate_slot(restored)
+                            except BaseException:
+                                restored.dead = True
+                                self._validation_failures += 1
+                                raise
+                            restored.validated = True
+                        else:
+                            await self._mint(idx)
                     except Exception as exc:
-                        self._retry_after = time.monotonic() + self._retry_delay_s
+                        retry_at = time.monotonic() + self._retry_delay_s
+                        self._slot_retry_after[idx] = retry_at
+                        if not self._has_live_slots():
+                            self._retry_after = retry_at
                         self._last_error = _failure_reason(exc)
                         logger.warning("pool[%d] refresh rejected (%s); retrying with backoff", idx, type(exc).__name__)
                     else:
+                        self._slot_retry_after.pop(idx, None)
+                        self._retry_after = 0.0
                         self._refreshes += 1
                         self._persist_to_disk()
                         self._refreshed.set()
@@ -435,6 +466,8 @@ class CookiePool:
             "live": len(live_slots),
             "mints": self._mints,
             "refreshes": self._refreshes,
+            "proactive_renewals": self._renewals,
+            "renew_before_s": self._renew_before_s,
             "rehydrated": self._rehydrated,
             "refreshing": len(self._refreshing_indices),
             "validation_failures": self._validation_failures,
