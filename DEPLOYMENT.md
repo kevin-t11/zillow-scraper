@@ -15,7 +15,9 @@ deploy the application. Run one deployment at a time.
 
 This guide updates the existing VM. Its `.env`, nginx, and systemd configuration
 remain in place. Keep credentials in the VM's `.env`. The configured pool uses
-24 property-detail HTTP sessions and 10 requests per session; the default path needs no browser. Discovery uses a separate pool of 4 search-validated Evomi sessions (`SEARCH_POOL_SIZE`).
+24 property-detail HTTP sessions and 10 requests per session; the default path needs no browser.
+Install the pinned `curl_cffi` dependency from `requirements.txt`: property details
+require its Chrome-compatible connection profile, not just a Chrome User-Agent. Discovery uses a separate pool of 4 search-validated Evomi sessions (`SEARCH_POOL_SIZE`).
 Original source history is retained from `ushixan/zillow-scraper`.
 
 ## 1. Test and push — on your Mac

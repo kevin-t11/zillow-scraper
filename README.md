@@ -7,7 +7,9 @@ Lightsail service, including market search and both listing performance updates.
 See [DEPLOYMENT.md](DEPLOYMENT.md) for configuration and verification.
 
 Fetches public Zillow listing details through validated Evomi residential HTTP
-sessions. The default path starts with a fresh HTTP cookie jar and retains
+sessions. Property details use a pinned Chrome-compatible `curl_cffi` transport;
+search discovery uses its separate HTTPX transport. The default path starts
+with a fresh HTTP cookie jar and retains
 cookies set by the server. It does not import browser-generated `_px3` cookies:
 controlled tests found that those cookies turned successful requests into 403s.
 
@@ -44,6 +46,13 @@ Both detail routes use Zillow's published `NotForSaleBotsQuery` persisted GET
 request, which includes photos, description, facts, and price/tax history in one
 response. It also returns active sale properties. The previous full-query POST
 was challenged with HTTP 403 while this GET returned the requested property.
+On October 15, the same query through the same Evomi IP returned PX 403 with
+HTTPX and full property data with the Chrome-compatible transport. Warming
+HTTPX with page cookies did not fix the rejection. Changing a User-Agent
+header alone does not change TLS or HTTP/2 connection behavior. Keep the
+`curl_cffi` version and browser profile pinned together in
+`requirements.txt` and `px_bypass/http_client.py`.
+
 The query identifier is in `px_bypass/queries/property_details.json`; see
 [query maintenance](px_bypass/queries/README.md) when Zillow changes its bundle.
 
@@ -241,7 +250,8 @@ zillow_scraper/
 │   ├── proxy.py              # Evomi sticky-session URL builder
 │   ├── queries/
 │   │   └── for_sale_non_priority.json   # verbatim Zillow GraphQL body
-│   ├── scraper.py            # concurrent httpx replay + retry/halt logic
+│   ├── http_client.py        # Chrome-compatible detail transport per Evomi session
+│   ├── scraper.py            # concurrent property GET + retry/halt logic
 │   ├── search.py             # market discovery and location filtering
 │   ├── serve.py              # FastAPI app + lifespan-managed pool
 │   ├── systemd-zillow.service

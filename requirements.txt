@@ -1,4 +1,5 @@
 httpx[http2]>=0.27.0
+curl_cffi==0.16.3
 certifi>=2024.2.2
 python-dotenv>=1.0.0
 fastapi>=0.115.0

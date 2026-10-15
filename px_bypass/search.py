@@ -83,6 +83,9 @@ class SearchError(RuntimeError):
 class SearchCookiePool(CookiePool):
     """Validate discovery independently of Zillow's property-detail service."""
 
+    def _build_client(self, session_id: str) -> httpx.AsyncClient:
+        return self._build_httpx_client(session_id)
+
     async def _validate_slot(self, slot: CookieSlot) -> None:
         payload = build_search_payload(
             location=None,

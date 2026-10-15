@@ -20,6 +20,7 @@ from typing import Awaitable, Callable, Optional
 import certifi
 import httpx
 
+from .http_client import PropertyClient
 from .proxy import EvomiConfig, build_proxy_url, make_session_id
 
 Minter = Callable[..., Awaitable[dict]]
@@ -52,7 +53,7 @@ class CookieSlot:
     idx: int
     cookies: dict
     session_id: str
-    client: httpx.AsyncClient  # has sticky Evomi proxy baked in
+    client: httpx.AsyncClient | PropertyClient  # has sticky Evomi proxy baked in
     sem: asyncio.Semaphore     # per-slot concurrency cap
     minted_at: float
     hits: int = 0
@@ -270,7 +271,14 @@ class CookiePool:
         except Exception as e:
             logger.warning("persist failed: %s", e)
 
-    def _build_client(self, session_id: str) -> httpx.AsyncClient:
+    def _build_client(self, session_id: str) -> PropertyClient:
+        return PropertyClient(
+            proxy=build_proxy_url(self._evomi, session=session_id, country="US", lifetime_min=30),
+            max_clients=self._per_slot_c,
+        )
+
+    def _build_httpx_client(self, session_id: str) -> httpx.AsyncClient:
+        """Discovery keeps its independently verified HTTPX transport."""
         proxy_url = build_proxy_url(
             self._evomi, session=session_id, country="US", lifetime_min=30,
         )
@@ -440,7 +448,7 @@ class CookiePool:
         }
 
 
-async def _close_later(client: httpx.AsyncClient) -> None:
+async def _close_later(client: httpx.AsyncClient | PropertyClient) -> None:
     try:
         await asyncio.sleep(60)
     finally:

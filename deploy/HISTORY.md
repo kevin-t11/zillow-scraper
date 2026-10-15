@@ -160,3 +160,38 @@ All 50 regression tests passed locally and in the staged VM checkout. All 24
 runtime manifest hashes matched the deployed files. The rollback backup is
 `/home/ubuntu/zillow-deploy-backups/url-tls-speed-20261011T091111Z`. Benchmark details and
 calling guidance are in [API.md](../API.md#https-proxy-connection-optimization-2026-10-11).
+
+
+## Property transport correction on October 15
+
+Both detail routes had stopped validating their HTTP sessions, while search
+continued to work. The deployed code and current query hash still matched the
+previous working release. In a controlled comparison through the same Evomi
+exit IP, HTTPX and ordinary libcurl returned PX challenges (HTTP 403), while
+libcurl with its Chrome profile returned the correct full property (HTTP 200).
+Warming the HTTPX session on the listing page added server cookies but did not
+restore access. This isolates the actionable difference to the HTTP client
+profile; it does not establish Zillow's internal reason for changing acceptance.
+
+Property sessions now use `curl_cffi==0.16.3` with the pinned `chrome150` profile
+and matching browser headers. Each Evomi session retains its own cookie jar
+and connection pool. TLS verification, explicit Evomi routing, concurrency
+limits, property-ID validation, bounded retries, and session replacement remain
+in effect. Search retains its independently validated HTTPX transport. A proxy
+403 is no longer logged as proof that cookies expired.
+
+All 76 regression tests passed locally and in an isolated Lightsail release.
+The tests include real HTTP requests through a local proxy to verify query
+encoding, session-cookie isolation, timeouts, and rejection handling.
+Local fresh tests returned all 100 expected unique properties for each route:
+URLs in 5.14 seconds and addresses in 8.52 seconds, with zero application cache
+hits or failures. The local pool ended with all 24 detail and 4 search sessions
+live. An isolated VM canary returned six full properties through each endpoint
+in 0.87 and 0.88 seconds respectively, and five search results in 0.89 seconds.
+Canary timings exclude public network transfer and service startup.
+
+The release and rollback folder is
+`/home/ubuntu/zillow-deploy-backups/chrome-transport-20261015`.
+The new dependency is installed in a separate release virtual environment;
+existing VM dependency versions are constrained to the previous release.
+No credentials, cookies, proxy IPs, or property payloads are committed.

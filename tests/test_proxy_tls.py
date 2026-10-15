@@ -2,7 +2,7 @@ import ssl
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from px_bypass.cookie_pool import CookiePool
+from px_bypass.search import SearchCookiePool
 from px_bypass.proxy import EvomiConfig
 
 
@@ -35,7 +35,7 @@ class ProxyStream:
 
 class ProxyTlsTests(unittest.IsolatedAsyncioTestCase):
     async def test_reconnecting_sessions_reuse_verified_proxy_tls_without_sharing_cookies(self):
-        pool = CookiePool(AsyncMock(), 2, evomi_cfg=EvomiConfig(
+        pool = SearchCookiePool(AsyncMock(), 2, evomi_cfg=EvomiConfig(
             'proxy.example.test', 1001, 'user', 'password', 'https'))
         clients = [pool._build_client(session) for session in ('first', 'second')]
         for client in clients:

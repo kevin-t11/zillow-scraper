@@ -21,6 +21,7 @@ import httpx
 
 from app.models import PropertyListing
 from .cookie_pool import CookiePool, PoolUnavailableError
+from .http_client import PropertyClient
 from .parser import parse_for_sale_non_priority
 from .proxy import resolve_proxy_url
 
@@ -78,7 +79,7 @@ class ScrapeStats:
 
 @dataclass
 class _State:
-    """Shared cross-task state for fail-fast on dead cookies."""
+    """Shared cross-task state for fail-fast on rejected sessions."""
     consecutive_proxy_blocks: int = 0
     halted: bool = False
     direct_disabled_until: float = 0.0  # disable direct path if it's getting blocked
@@ -88,8 +89,8 @@ class _State:
         if self.consecutive_proxy_blocks >= 3 and not self.halted:
             self.halted = True
             logger.error(
-                "px_bypass: 3 consecutive 403s through PROXY — cookies expired. "
-                "Refresher will mint fresh ones; rerun shortly."
+                "px_bypass: 3 consecutive 403s through PROXY; upstream rejected "
+                "the session. Stopping this batch."
             )
 
     def record_proxy_success(self) -> None:
@@ -115,7 +116,7 @@ def _build_request(zpid: str, slug: str, query_template: dict) -> tuple[str, dic
 
 
 async def _attempt(
-    client: httpx.AsyncClient, url: str, body: dict, headers: dict, cookies: dict,
+    client: httpx.AsyncClient | PropertyClient, url: str, body: dict, headers: dict, cookies: dict,
     *, timeout: float = 30,
 ) -> tuple[int, bytes]:
     """One persisted-query GET, shared by validation and property fetches."""
@@ -128,7 +129,7 @@ async def _attempt(
 
 async def _fetch_one(
     direct_client: httpx.AsyncClient,
-    proxy_client: Optional[httpx.AsyncClient],
+    proxy_client: httpx.AsyncClient | PropertyClient | None,
     listing_url: str,
     cookies: dict,
     query_template: dict,
@@ -172,7 +173,7 @@ def _parse_requested_listing(content: bytes, listing_url: str, zpid: str) -> Pro
 
 
 async def _fetch_one_impl(
-    direct_client: httpx.AsyncClient, proxy_client: Optional[httpx.AsyncClient],
+    direct_client: httpx.AsyncClient, proxy_client: httpx.AsyncClient | PropertyClient | None,
     listing_url: str, cookies: dict, query_template: dict, sem: asyncio.Semaphore,
     state: _State, max_retries: int = 3, skip_direct: bool = False,
     pool: Optional[CookiePool] = None,
@@ -307,8 +308,8 @@ async def scrape_urls_via_px(
     )
 
     direct_ctx = httpx.AsyncClient(http2=True, follow_redirects=True, limits=limits)
-    proxy_ctx = httpx.AsyncClient(
-        http2=True, follow_redirects=True, proxy=proxy_url, limits=limits,
+    proxy_ctx = PropertyClient(
+        proxy=proxy_url, max_clients=concurrency,
     ) if proxy_url else None
 
     results: list[PropertyListing] = []
